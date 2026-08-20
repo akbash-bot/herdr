@@ -224,18 +224,17 @@ pub(crate) fn encode_local_pane_graphics(
 ) -> EncodedGraphics {
     let visible = app.mode == Mode::Terminal && cell_size.is_known();
     if graphics.slots.is_empty() {
-        let mut bytes = if cache.has_pane_sources() {
+        if !visible {
+            return EncodedGraphics {
+                bytes: cache.clear_bytes(),
+                incomplete: false,
+            };
+        }
+        let mut bytes = if transaction_budget.is_none() && cache.has_pane_sources() {
             cache.clear_pane_sources()
         } else {
             Vec::new()
         };
-        if !visible {
-            bytes.extend(cache.clear_bytes());
-            return EncodedGraphics {
-                bytes,
-                incomplete: false,
-            };
-        }
         let placements = collect_visible_placements(
             app,
             graphics,
@@ -2636,6 +2635,47 @@ mod tests {
         assert_eq!(cache.oversized.len(), 1);
         assert_eq!(cache.images.len(), 1);
         assert!(cache.sources.contains_key(&small_source));
+    }
+
+    #[test]
+    fn budgeted_pane_cleanup_precedes_terminal_image_upload() {
+        let mut cache = HostGraphicsCache::default();
+        let pane_source = HostSourceKey::PaneLayer {
+            pane_id: PaneId::from_raw(1),
+            layer_id: "primary".into(),
+        };
+        cache.sources.insert(pane_source, 99);
+        cache.images.insert(
+            99,
+            ImageSignature {
+                image_width: 30,
+                image_height: 30,
+                format_code: 32,
+                data_len: 30 * 30 * 4,
+                data_fingerprint: 9,
+            },
+        );
+        let terminal = test_placement(0, 0);
+
+        let cleanup = encode_terminal_graphics_update(
+            &mut cache,
+            std::slice::from_ref(&terminal),
+            false,
+            Some(HEADLESS_GRAPHICS_TRANSACTION_BUDGET),
+        );
+        assert!(cleanup.incomplete);
+        let cleanup = String::from_utf8(cleanup.bytes).unwrap();
+        assert!(cleanup.contains("a=d,d=I,i=99"));
+        assert!(!cleanup.contains("a=t"));
+        assert!(cache.images.is_empty());
+
+        let upload = encode_terminal_graphics_update(
+            &mut cache,
+            &[terminal],
+            false,
+            Some(HEADLESS_GRAPHICS_TRANSACTION_BUDGET),
+        );
+        assert!(String::from_utf8_lossy(&upload.bytes).contains("a=t"));
     }
 
     #[test]
