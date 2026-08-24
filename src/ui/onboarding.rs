@@ -12,8 +12,6 @@ use super::widgets::{
 };
 use crate::app::AppState;
 
-const ONBOARDING_PREFIX_LABEL: &str = "ctrl+b";
-
 pub(super) fn render_onboarding_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
     super::dim_background(frame, area);
     render_onboarding_welcome(app, frame, area);
@@ -72,7 +70,7 @@ fn render_onboarding_welcome(app: &AppState, frame: &mut Frame, area: Rect) {
     let key_line = Line::from(vec![
         Span::styled("  ", Style::default()),
         Span::styled(
-            ONBOARDING_PREFIX_LABEL,
+            crate::config::format_key_combo((app.prefix_code, app.prefix_mods)),
             Style::default()
                 .fg(app.palette.accent)
                 .add_modifier(Modifier::BOLD),
@@ -111,4 +109,38 @@ fn render_onboarding_welcome(app: &AppState, frame: &mut Frame, area: Rect) {
             .bg(app.palette.accent)
             .add_modifier(Modifier::BOLD),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn onboarding_renders_configured_prefix() {
+        let config: crate::config::Config = toml::from_str(
+            r#"
+[keys]
+prefix = "ctrl+space"
+"#,
+        )
+        .expect("config parses");
+        let mut app = crate::app::state::AppState::test_new();
+        (app.prefix_code, app.prefix_mods) = config.prefix_key();
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24))
+            .expect("test terminal");
+
+        terminal
+            .draw(|frame| render_onboarding_overlay(&app, frame, frame.area()))
+            .expect("draw onboarding overlay");
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("ctrl+space"));
+        assert!(!rendered.contains("ctrl+b"));
+    }
 }
