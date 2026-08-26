@@ -347,8 +347,8 @@ fn normalized_process_name(process: &crate::platform::ForegroundProcess) -> Stri
         }
     }
 
-    if lower_effective == "agent" && is_versioned_macos_grok_process_name(&process.name) {
-        return agent_label(Agent::Grok).to_string();
+    if let Some(alias) = crate::platform::process_agent_alias(process) {
+        return alias.to_string();
     }
 
     if identify_agent(effective).is_some() {
@@ -650,31 +650,6 @@ fn path_basename(path: &str) -> &str {
         .unwrap_or(path)
 }
 
-fn is_versioned_macos_grok_process_name(name: &str) -> bool {
-    // macOS pbi_comm stores 15 name bytes plus its terminating NUL.
-    const MACOS_COMM_BYTES: usize = 15;
-
-    if name.len() != MACOS_COMM_BYTES {
-        return false;
-    }
-    let Some(version_and_platform) = name.strip_prefix("grok-") else {
-        return false;
-    };
-    let Some((version, platform)) = version_and_platform.split_once('-') else {
-        return false;
-    };
-
-    let mut version_parts = version.split('.');
-    let valid_version = (0..3).all(|_| {
-        version_parts
-            .next()
-            .is_some_and(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
-    }) && version_parts.next().is_none();
-    let macos_name = !platform.is_empty() && "macos-".starts_with(platform);
-
-    valid_version && macos_name
-}
-
 fn process_priority(process: &crate::platform::ForegroundProcess, normalized_name: &str) -> u8 {
     let lower_name = normalized_name.to_lowercase();
     if lower_name != process.name.to_lowercase() {
@@ -732,16 +707,6 @@ mod tests {
             argv0: None,
             argv: Some(argv.iter().map(|arg| (*arg).to_string()).collect()),
             cmdline: Some(argv.join(" ")),
-        }
-    }
-
-    fn reported_foreground_process(name: &str, argv0: &str) -> crate::platform::ForegroundProcess {
-        crate::platform::ForegroundProcess {
-            pid: 123,
-            name: name.to_string(),
-            argv0: Some(argv0.to_string()),
-            argv: Some(vec![argv0.to_string()]),
-            cmdline: Some(argv0.to_string()),
         }
     }
 
@@ -986,49 +951,22 @@ mod tests {
     }
 
     #[test]
-    fn identify_agent_in_job_detects_grok_started_through_agent_symlink() {
-        let job = crate::platform::ForegroundJob {
-            process_group_id: 123,
-            processes: vec![reported_foreground_process("grok-1.0.5-maco", "agent")],
-        };
-
-        assert_eq!(
-            identify_agent_in_job(&job),
-            Some((Agent::Grok, "grok".to_string()))
-        );
-    }
-
-    #[test]
     fn identify_agent_in_job_preserves_canonical_grok_launch() {
         let job = crate::platform::ForegroundJob {
             process_group_id: 123,
-            processes: vec![reported_foreground_process("grok-1.0.5-maco", "grok")],
+            processes: vec![crate::platform::ForegroundProcess {
+                pid: 123,
+                name: "grok-1.0.5-maco".to_string(),
+                argv0: Some("grok".to_string()),
+                argv: Some(vec!["grok".to_string()]),
+                cmdline: Some("grok".to_string()),
+            }],
         };
 
         assert_eq!(
             identify_agent_in_job(&job),
             Some((Agent::Grok, "grok".to_string()))
         );
-    }
-
-    #[test]
-    fn identify_agent_in_job_does_not_treat_generic_agent_as_grok() {
-        for name in [
-            "agent",
-            "cursor-agent",
-            "grok-helper-maco",
-            "grok-1.0-maco",
-            "grok-1.0.5-m",
-            "grok-1.0.5-linux",
-            "grok-1.0.5-macos-helper",
-        ] {
-            let job = crate::platform::ForegroundJob {
-                process_group_id: 123,
-                processes: vec![reported_foreground_process(name, "agent")],
-            };
-
-            assert_eq!(identify_agent_in_job(&job), None, "name: {name}");
-        }
     }
 
     #[test]

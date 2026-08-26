@@ -311,6 +311,105 @@ pub(crate) fn is_pane_shell_process_name(name: &str) -> bool {
     )
 }
 
+pub(crate) fn process_agent_alias(process: &ForegroundProcess) -> Option<&'static str> {
+    process_agent_alias_platform(process)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn process_agent_alias_platform(_process: &ForegroundProcess) -> Option<&'static str> {
+    None
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn matches_macos_grok_agent_alias(name: &str, argv0: Option<&str>) -> bool {
+    // macOS pbi_comm stores 15 name bytes plus its terminating NUL.
+    const MACOS_COMM_BYTES: usize = 15;
+
+    if argv0 != Some("agent") || name.len() != MACOS_COMM_BYTES {
+        return false;
+    }
+    let Some(version_and_platform) = name.strip_prefix("grok-") else {
+        return false;
+    };
+    let Some((version, platform)) = version_and_platform.split_once('-') else {
+        return false;
+    };
+
+    let mut version_parts = version.split('.');
+    let valid_version = (0..3).all(|_| {
+        version_parts
+            .next()
+            .is_some_and(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
+    }) && version_parts.next().is_none();
+    let macos_name = !platform.is_empty() && "macos-".starts_with(platform);
+
+    valid_version && macos_name
+}
+
+#[cfg(test)]
+mod process_alias_tests {
+    use super::*;
+
+    fn reported_grok_process() -> ForegroundProcess {
+        ForegroundProcess {
+            pid: 123,
+            name: "grok-1.0.5-maco".to_string(),
+            argv0: Some("agent".to_string()),
+            argv: Some(vec!["agent".to_string()]),
+            cmdline: Some("agent".to_string()),
+        }
+    }
+
+    #[test]
+    fn macos_grok_agent_alias_contract_is_strict() {
+        assert!(matches_macos_grok_agent_alias(
+            "grok-1.0.5-maco",
+            Some("agent")
+        ));
+        for (name, argv0) in [
+            ("agent", Some("agent")),
+            ("cursor-agent", Some("agent")),
+            ("grok-helper-maco", Some("agent")),
+            ("grok-1.0-maco", Some("agent")),
+            ("grok-1.0.5-m", Some("agent")),
+            ("grok-1.0.5-linux", Some("agent")),
+            ("grok-1.0.5-macos-helper", Some("agent")),
+            ("grok-1.0.5-macos-aarch64", Some("agent")),
+            ("grok-1.0.5-maco", Some("Agent")),
+            ("grok-1.0.5-maco", Some("/tmp/agent")),
+            ("grok-1.0.5-maco", None),
+        ] {
+            assert!(
+                !matches_macos_grok_agent_alias(name, argv0),
+                "name: {name}, argv0: {argv0:?}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_process_alias_reaches_agent_identification() {
+        let job = ForegroundJob {
+            process_group_id: 123,
+            processes: vec![reported_grok_process()],
+        };
+        assert_eq!(
+            crate::detect::identify_agent_in_job(&job),
+            Some((crate::detect::Agent::Grok, "grok".to_string()))
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn non_macos_process_alias_does_not_reach_agent_identification() {
+        let job = ForegroundJob {
+            process_group_id: 123,
+            processes: vec![reported_grok_process()],
+        };
+        assert_eq!(crate::detect::identify_agent_in_job(&job), None);
+    }
+}
+
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn process_agent_hint(_pid: u32) -> Option<crate::detect::Agent> {
     None
