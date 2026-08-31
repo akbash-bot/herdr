@@ -608,20 +608,27 @@ fn agent_name_from_known_package_path(path: &str) -> Option<String> {
         .split(['/', '\\'])
         .filter(|component| !component.is_empty())
         .collect();
-    let bundled_pi_cli = [
+    let ends_with = |suffix: &[&str]| {
+        raw_components.len() >= suffix.len()
+            && raw_components[raw_components.len() - suffix.len()..]
+                .iter()
+                .zip(suffix)
+                .all(|(actual, expected)| actual.eq_ignore_ascii_case(expected))
+    };
+    if ends_with(&[
+        "node_modules",
+        "@earendil-works",
+        "pi-coding-agent",
+        "dist",
+        "cli.js",
+    ]) || ends_with(&[
         "node_modules",
         "@earendil-works",
         "pi-coding-agent",
         "dist",
         "bundle",
         "cli.js",
-    ];
-    if raw_components.len() >= bundled_pi_cli.len()
-        && raw_components[raw_components.len() - bundled_pi_cli.len()..]
-            .iter()
-            .zip(bundled_pi_cli)
-            .all(|(actual, expected)| actual.eq_ignore_ascii_case(expected))
-    {
+    ]) {
         return Some(agent_label(Agent::Pi).to_string());
     }
 
@@ -630,17 +637,6 @@ fn agent_name_from_known_package_path(path: &str) -> Option<String> {
         .map(normalized_agent_lookup_name)
         .collect();
     for window in components.windows(5) {
-        if window
-            == [
-                "node_modules",
-                "@earendil-works",
-                "pi-coding-agent",
-                "dist",
-                "cli",
-            ]
-        {
-            return Some(agent_label(Agent::Pi).to_string());
-        }
         if window == ["node_modules", "@qwen-code", "qwen-code", "dist", "index"] {
             return Some(agent_label(Agent::Qwen).to_string());
         }
@@ -1232,6 +1228,8 @@ mod tests {
             r"C:\Users\herdr\AppData\Local\pi-node\current\node_modules\@earendil-works\pi-coding-agent\dist\bundle\update.js",
             r"C:\workspace\dist\bundle\cli.js",
             r"C:\workspace\node_modules\other-package\dist\bundle\cli.js",
+            r"C:\workspace\node_modules\@earendil-works\pi-coding-agent\dist\cli.exe",
+            r"C:\workspace\node_modules\@earendil-works\pi-coding-agent\dist\cli.js\other.js",
             r"C:\workspace\node_modules\@earendil-works\pi-coding-agent\dist\bundle\cli.exe",
             r"C:\workspace\node_modules\@earendil-works\pi-coding-agent\dist\bundle\cli.js\other.js",
         ] {
