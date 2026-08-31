@@ -616,10 +616,10 @@ pub(crate) fn events_require_host_surface_redraw(
     events: &[RawInputEvent],
     redraw_on_focus_gained: bool,
 ) -> bool {
-    redraw_on_focus_gained
-        && events
-            .iter()
-            .any(|event| matches!(event, RawInputEvent::OuterFocusGained))
+    events.iter().any(|event| {
+        matches!(event, RawInputEvent::HostColorSchemeChanged(_))
+            || (redraw_on_focus_gained && matches!(event, RawInputEvent::OuterFocusGained))
+    })
 }
 
 #[cfg(any(not(windows), test))]
@@ -1590,13 +1590,17 @@ mod tests {
     }
 
     #[test]
-    fn outer_focus_gained_requests_host_surface_redraw() {
+    fn host_events_request_the_expected_surface_redraw() {
         let events = parse_raw_input_bytes_sync(b"\x1b[I");
         assert!(events_require_host_surface_redraw(&events, true));
         assert!(!events_require_host_surface_redraw(&events, false));
 
         let events = parse_raw_input_bytes_sync(b"\x1b[O");
         assert!(!events_require_host_surface_redraw(&events, true));
+
+        let events = parse_raw_input_bytes_sync(b"\x1b[?997;1n");
+        assert!(events_require_host_surface_redraw(&events, true));
+        assert!(events_require_host_surface_redraw(&events, false));
     }
 
     #[test]
