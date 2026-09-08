@@ -1,0 +1,70 @@
+diff --git a/vendor/libghostty-vt/build.zig.zon.json b/vendor/libghostty-vt/build.zig.zon.json
+index 63d5fd61..7f64f2c5 100644
+--- a/vendor/libghostty-vt/build.zig.zon.json
++++ b/vendor/libghostty-vt/build.zig.zon.json
+@@ -139,10 +139,10 @@
+     "url": "https://gitlab.freedesktop.org/wayland/wayland-protocols/-/archive/1.47/wayland-protocols-1.47.tar.gz",
+     "hash": "sha256-3S3xSrX0EDgleq7cxLX7msDuAY8/D5SvkJcCjmDTMiM="
+   },
+-  "N-V-__8AAAzZywE3s51XfsLbP9eyEw57ae9swYB9aGB6fCMs": {
++  "N-V-__8AAP5JWgCGP_AD0teWpa4krRvE9VPZzvviGdbmN4jI": {
+     "name": "wuffs",
+-    "url": "https://deps.files.ghostty.org/wuffs-122037b39d577ec2db3fd7b2130e7b69ef6cc1807d68607a7c232c958315d381b5cd.tar.gz",
+-    "hash": "sha256-nkzSCr6W5sTG7enDBXEIhgEm574uLD41UVR2wlC+HBM="
++    "url": "git+https://github.com/google/wuffs-mirror-release-c.git?rev=v0.4.0-alpha.10#7411f488fe2e2c205c3d3b3d28638b7356522930",
++    "hash": "sha256-AMuAaCbNJYnSeac1B1IRSUh4rlE2KphT04/Ak4Pig5M="
+   },
+   "z2d-0.10.0-j5P_Hu-6FgBsZNgwphIqh17jDnj8_yPtD8yzjO6PpHRQ": {
+     "name": "z2d",
+diff --git a/vendor/libghostty-vt/build.zig.zon.nix b/vendor/libghostty-vt/build.zig.zon.nix
+index 2b05dd1b..124c2d2a 100644
+--- a/vendor/libghostty-vt/build.zig.zon.nix
++++ b/vendor/libghostty-vt/build.zig.zon.nix
+@@ -346,12 +346,12 @@ in
+       };
+     }
+     {
+-      name = "N-V-__8AAAzZywE3s51XfsLbP9eyEw57ae9swYB9aGB6fCMs";
++      name = "N-V-__8AAP5JWgCGP_AD0teWpa4krRvE9VPZzvviGdbmN4jI";
+       path = fetchZigArtifact {
+         name = "wuffs";
+-        url = "https://deps.files.ghostty.org/wuffs-122037b39d577ec2db3fd7b2130e7b69ef6cc1807d68607a7c232c958315d381b5cd.tar.gz";
+-        hash = "sha256-nkzSCr6W5sTG7enDBXEIhgEm574uLD41UVR2wlC+HBM=";
+-        unpack = false;
++        url = "git+https://github.com/google/wuffs-mirror-release-c.git?rev=v0.4.0-alpha.10#7411f488fe2e2c205c3d3b3d28638b7356522930";
++        hash = "sha256-AMuAaCbNJYnSeac1B1IRSUh4rlE2KphT04/Ak4Pig5M=";
++        unpack = true;
+       };
+     }
+     {
+diff --git a/vendor/libghostty-vt/build.zig.zon.txt b/vendor/libghostty-vt/build.zig.zon.txt
+index 02da0630..55444ddd 100644
+--- a/vendor/libghostty-vt/build.zig.zon.txt
++++ b/vendor/libghostty-vt/build.zig.zon.txt
+@@ -1,3 +1,4 @@
++git+https://github.com/google/wuffs-mirror-release-c.git?rev=v0.4.0-alpha.10#7411f488fe2e2c205c3d3b3d28638b7356522930
+ git+https://github.com/jacobsandlund/uucode#5f05f8f83a75caea201f12cc8ea32a2d82ea9732
+ https://deps.files.ghostty.org/DearBindings_v0.17_ImGui_v1.92.5-docking.tar.gz
+ https://deps.files.ghostty.org/JetBrainsMono-2.304.tar.gz
+@@ -24,7 +25,6 @@ https://deps.files.ghostty.org/uucode-0.2.0-ZZjBPqZVVABQepOqZHR7vV_NcaN-wats0IB6
+ https://deps.files.ghostty.org/vaxis-7dbb9fd3122e4ffad262dd7c151d80d863b68558.tar.gz
+ https://deps.files.ghostty.org/wayland-9cb3d7aa9dc995ffafdbdef7ab86a949d0fb0e7d.tar.gz
+ https://deps.files.ghostty.org/wayland-protocols-258d8f88f2c8c25a830c6316f87d23ce1a0f12d9.tar.gz
+-https://deps.files.ghostty.org/wuffs-122037b39d577ec2db3fd7b2130e7b69ef6cc1807d68607a7c232c958315d381b5cd.tar.gz
+ https://deps.files.ghostty.org/z2d-0.10.0-j5P_Hu-6FgBsZNgwphIqh17jDnj8_yPtD8yzjO6PpHRQ.tar.gz
+ https://deps.files.ghostty.org/zf-3c52637b7e937c5ae61fd679717da3e276765b23.tar.gz
+ https://deps.files.ghostty.org/zig_js-04db83c617da1956ac5adc1cb9ba1e434c1cb6fd.tar.gz
+diff --git a/vendor/libghostty-vt/pkg/wuffs/build.zig.zon b/vendor/libghostty-vt/pkg/wuffs/build.zig.zon
+index eb99ba0b..532a116e 100644
+--- a/vendor/libghostty-vt/pkg/wuffs/build.zig.zon
++++ b/vendor/libghostty-vt/pkg/wuffs/build.zig.zon
+@@ -5,7 +5,7 @@
+     .dependencies = .{
+         // google/wuffs
+         .wuffs = .{
+-            .url = "https://deps.files.ghostty.org/wuffs-122037b39d577ec2db3fd7b2130e7b69ef6cc1807d68607a7c232c958315d381b5cd.tar.gz",
+-            .hash = "N-V-__8AAAzZywE3s51XfsLbP9eyEw57ae9swYB9aGB6fCMs",
++            .url = "git+https://github.com/google/wuffs-mirror-release-c.git?rev=v0.4.0-alpha.10#7411f488fe2e2c205c3d3b3d28638b7356522930",
++            .hash = "N-V-__8AAP5JWgCGP_AD0teWpa4krRvE9VPZzvviGdbmN4jI",
+             .lazy = true,
+         },

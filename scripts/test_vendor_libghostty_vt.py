@@ -133,6 +133,45 @@ class VendorLibghosttyVtTests(unittest.TestCase):
                 f"stderr:\n{result.stderr}",
             )
 
+    def test_wuffs_dependency_uses_c_only_release_mirror(self) -> None:
+        root = Path(__file__).resolve().parent.parent / "vendor" / "libghostty-vt"
+        dependency_files = [
+            root / "build.zig.zon.json",
+            root / "build.zig.zon.nix",
+            root / "build.zig.zon.txt",
+            root / "pkg" / "wuffs" / "build.zig.zon",
+        ]
+        c_only_url = (
+            "git+https://github.com/google/wuffs-mirror-release-c.git"
+            "?rev=v0.4.0-alpha.10#7411f488fe2e2c205c3d3b3d28638b7356522930"
+        )
+        zig_hash = "N-V-__8AAP5JWgCGP_AD0teWpa4krRvE9VPZzvviGdbmN4jI"
+        nix_hash = "sha256-AMuAaCbNJYnSeac1B1IRSUh4rlE2KphT04/Ak4Pig5M="
+        old_zig_hash = "N-V-__8AAAzZywE3s51XfsLbP9eyEw57ae9swYB9aGB6fCMs"
+        old_archive = (
+            "wuffs-122037b39d577ec2db3fd7b2130e7b69ef6cc1807d68607a7c232c958315d381b5cd.tar.gz"
+        )
+
+        for path in dependency_files:
+            with self.subTest(path=path.relative_to(root)):
+                text = path.read_text()
+                self.assertIn(c_only_url, text)
+                self.assertNotIn(old_zig_hash, text)
+                self.assertNotIn(old_archive, text)
+
+        package_manifest = (root / "pkg" / "wuffs" / "build.zig.zon").read_text()
+        generated_json = (root / "build.zig.zon.json").read_text()
+        generated_nix = (root / "build.zig.zon.nix").read_text()
+        self.assertIn(zig_hash, package_manifest)
+        self.assertIn(zig_hash, generated_json)
+        self.assertIn(zig_hash, generated_nix)
+        self.assertIn(nix_hash, generated_json)
+        self.assertIn(nix_hash, generated_nix)
+        self.assertRegex(
+            generated_nix,
+            r'name = "wuffs";\n\s+url = .*\n\s+hash = .*\n\s+unpack = true;',
+        )
+
     def test_embedded_libghostty_logging_is_silenced(self) -> None:
         root = Path(__file__).resolve().parent.parent / "vendor" / "libghostty-vt"
         lib_vt = root / "src" / "lib_vt.zig"

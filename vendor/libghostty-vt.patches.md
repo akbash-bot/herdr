@@ -75,3 +75,42 @@ cargo nextest run --locked modify_other_keys_query_tracks_mode_two
 cargo nextest run --locked host_report_all_supplies_printable_releases_for_event_type_only_panes
 python3 -m unittest scripts.test_vendor_libghostty_vt scripts.test_ui_hot_path_architecture
 ```
+
+## 0003 use the C-only Wuffs release mirror
+
+status: active
+
+patch: `vendor/patches/libghostty-vt/0003-use-c-only-wuffs-mirror.patch`
+
+herdr issue: https://github.com/herdrdev/herdr/issues/3737
+
+upstream discussion: https://github.com/ghostty-org/ghostty/pull/13789
+
+upstream pr: https://github.com/ghostty-org/ghostty/pull/13789
+
+vendored base: `c5a21edfcbc2d5b46540ad91b7980aca31f5f1f3`
+
+local files:
+
+- `vendor/libghostty-vt/build.zig.zon.json`
+- `vendor/libghostty-vt/build.zig.zon.nix`
+- `vendor/libghostty-vt/build.zig.zon.txt`
+- `vendor/libghostty-vt/pkg/wuffs/build.zig.zon`
+
+reason: The full Wuffs source archive includes an artificial malformed JPEG
+that some endpoint protection products delete during Nix cache realization or
+Zig dependency fetching. This backports the merged upstream switch to Wuffs'
+C-only release mirror, which contains the C sources libghostty-vt compiles but
+not the unrelated test corpus.
+
+remove when: the vendored source contains Ghostty PR 13789, commit
+`7c4c7adadc8b080ab168ed0af48319185dcbd2ba`, or an equivalent C-only Wuffs pin,
+and the dependency and build verification passes without this patch.
+
+verification:
+
+```sh
+python3 -m unittest scripts.test_vendor_libghostty_vt
+just check
+nix build .#herdr
+```
