@@ -77,6 +77,22 @@ function repo(overrides: Record<string, unknown> = {}): Record<string, unknown> 
   };
 }
 
+function pluginRepositories(
+  count: number,
+  overrides: (index: number) => Record<string, unknown>,
+): Record<string, unknown>[] {
+  return Array.from({ length: count }, (_, index) =>
+    repo({
+      id: index + 1,
+      full_name: `owner/plugin-${index}`,
+      owner: { login: "owner" },
+      name: `plugin-${index}`,
+      html_url: `https://github.com/owner/plugin-${index}`,
+      ...overrides(index),
+    }),
+  );
+}
+
 function manifest(overrides = ""): string {
   return `
 id = "example.plugin"
@@ -104,6 +120,7 @@ function repositoryFetch(options: {
   totalCount?: number;
   incompleteResults?: boolean;
   searchStatus?: number;
+  searchEffect?: (query: string) => number | undefined | Promise<number | undefined>;
   treeStatus?: Record<string, number>;
   truncatedTrees?: Set<string>;
   onRequest?: (kind: "search" | "head" | "tree" | "manifest", detail: string) => void;
@@ -113,10 +130,40 @@ function repositoryFetch(options: {
     if (url.pathname === "/search/repositories") {
       options.onRequest?.("search", url.toString());
       if (options.searchStatus) return new Response("search failed", { status: options.searchStatus });
+      const page = Number(url.searchParams.get("page") ?? "1");
+      const perPage = Number(url.searchParams.get("per_page") ?? "30");
+      const query = url.searchParams.get("q") ?? "";
+      const queryStatus = await options.searchEffect?.(query);
+      if (queryStatus) return new Response("search failed", { status: queryStatus });
+      const createdRange = query.match(
+        /created:(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})/,
+      );
+      const createdStart = createdRange?.[1];
+      const createdEnd = createdRange?.[2];
+      const repositories = options.repositories
+        .filter((repository) => {
+          const createdAt = String(repository.created_at ?? "").slice(0, 10);
+          return (
+            (!createdStart || createdAt >= createdStart) &&
+            (!createdEnd || createdAt <= createdEnd)
+          );
+        })
+        .sort(
+          (a, b) =>
+            Number(b.stargazers_count ?? 0) - Number(a.stargazers_count ?? 0) ||
+            Number(a.id ?? 0) - Number(b.id ?? 0),
+        );
+      const start = (page - 1) * perPage;
+      if (start >= 1000) {
+        return new Response("Only the first 1000 search results are available", { status: 422 });
+      }
       return Response.json({
-        total_count: options.totalCount ?? options.repositories.length,
+        total_count:
+          createdStart || createdEnd
+            ? repositories.length
+            : options.totalCount ?? repositories.length,
         incomplete_results: options.incompleteResults ?? false,
-        items: options.repositories,
+        items: repositories.slice(start, Math.min(start + perPage, 1000)),
       });
     }
 
@@ -336,6 +383,95 @@ describe("refreshPlugins", () => {
         },
       ],
     });
+  });
+
+  test("collects eligible repositories beyond GitHub's 1000-result search window", async () => {
+    const requests: string[] = [];
+    const repositories = pluginRepositories(1001, (index) => ({
+      stargazers_count: index < 1000 ? 1 : 0,
+      created_at: index < 500 ? "2012-01-01T00:00:00Z" : "2024-01-01T00:00:00Z",
+    }));
+    const blacklist = new MemoryKV(
+      repositories.slice(0, 1000).map((repository) => `repo:${repository.full_name}`),
+    );
+
+    const result = await refreshPlugins(env(new MemoryR2(), blacklist), {
+      fetch: repositoryFetch({
+        repositories,
+        onRequest(kind, detail) {
+          if (kind === "search") requests.push(detail);
+        },
+      }),
+      logger: { error() {} },
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.snapshot.source).toMatchObject({
+      totalCount: 1001,
+      collectedCount: 1001,
+      blacklistedCount: 1000,
+      truncated: false,
+    });
+    expect(result.snapshot.source.warnings).toBeUndefined();
+    expect(result.snapshot.plugins.map((plugin) => plugin.fullName)).toEqual([
+      "owner/plugin-1000",
+    ]);
+    expect(requests.some((request) => request.includes("created%3A"))).toBe(true);
+  });
+
+  test("preserves all primary objects when a partitioned search fails", async () => {
+    const bucket = new MemoryR2();
+    const previous = {
+      "plugins/index.json": '{"snapshot":"previous"}',
+      "plugins/scan-cache.json": '{"cache":"previous"}',
+      "plugins/star-history.json": '{"history":"previous"}',
+    };
+    for (const [key, value] of Object.entries(previous)) await bucket.put(key, value);
+    const repositories = pluginRepositories(1001, (index) => ({
+      created_at: index < 500 ? "2012-01-01T00:00:00Z" : "2024-01-01T00:00:00Z",
+    }));
+
+    let qualifiedRequest = 0;
+    let delayedSiblingFinished = false;
+    const result = await refreshPlugins(env(bucket), {
+      fetch: repositoryFetch({
+        repositories,
+        async searchEffect(query) {
+          if (!query.includes("created:")) return undefined;
+          qualifiedRequest += 1;
+          if (qualifiedRequest === 1) return undefined;
+          if (qualifiedRequest === 2) {
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            delayedSiblingFinished = true;
+            return undefined;
+          }
+          return 429;
+        },
+      }),
+      logger: { error() {} },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(delayedSiblingFinished).toBe(true);
+    for (const [key, value] of Object.entries(previous)) {
+      expect(bucket.objects.get(key)?.value).toBe(value);
+    }
+  });
+
+  test("fails closed when more than 1000 repositories share one creation day", async () => {
+    const bucket = new MemoryR2();
+    const repositories = pluginRepositories(1001, () => ({
+      created_at: "2024-01-01T00:00:00Z",
+    }));
+
+    const result = await refreshPlugins(env(bucket), {
+      fetch: repositoryFetch({ repositories }),
+      logger: { error() {} },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(bucket.objects.has("plugins/index.json")).toBe(false);
   });
 
   test("reuses cached manifests without resolving or rescanning an unchanged repository", async () => {
@@ -901,6 +1037,10 @@ describe("refreshPlugins", () => {
     {
       name: "incomplete search results",
       fetch: repositoryFetch({ repositories: [repo()], incompleteResults: true }),
+    },
+    {
+      name: "a malformed repository",
+      fetch: repositoryFetch({ repositories: [repo({ owner: null })] }),
     },
   ]) {
     test(`preserves the current snapshot on ${name}`, async () => {

@@ -11,7 +11,9 @@ const GITHUB_GRAPHQL_URL = `${GITHUB_API_URL}/graphql`;
 const BLACKLIST_REPO_KEY_PREFIX = "repo:";
 const PLUGIN_MANIFEST_FILE = "herdr-plugin.toml";
 const PER_PAGE = 100;
-const MAX_REPOS = 1000;
+const GITHUB_SEARCH_RESULT_CAP = 1000;
+const GITHUB_SEARCH_REQUEST_LIMIT = 30;
+const GITHUB_REPOSITORY_EPOCH = "2007-01-01";
 const GRAPHQL_BATCH_SIZE = 50;
 const NETWORK_CONCURRENCY = 5;
 const MANIFEST_MAX_BYTES = 32 * 1024;
@@ -387,43 +389,191 @@ export async function refreshPlugins(
   }
 }
 
+type GitHubSearchPage = {
+  totalCount: number;
+  repositories: GitHubRepository[];
+};
+
+type GitHubSearchBudget = {
+  requests: number;
+};
+
 async function fetchGitHubRepositories(
   fetchFn: FetchLike,
   token: string,
   timeoutMs = REQUEST_TIMEOUT_MS,
 ): Promise<{ repositories: GitHubRepository[]; totalCount: number; truncated: boolean }> {
-  const repositories: GitHubRepository[] = [];
-  let totalCount = 0;
+  const budget: GitHubSearchBudget = { requests: 0 };
+  const firstPage = await fetchGitHubSearchPage(
+    fetchFn,
+    token,
+    GITHUB_QUERY,
+    1,
+    budget,
+    timeoutMs,
+  );
+  const repositories =
+    firstPage.totalCount <= GITHUB_SEARCH_RESULT_CAP
+      ? await fetchGitHubSearchPages(
+          fetchFn,
+          token,
+          GITHUB_QUERY,
+          firstPage,
+          budget,
+          timeoutMs,
+        )
+      : await splitGitHubSearchRange(
+          fetchFn,
+          token,
+          GITHUB_REPOSITORY_EPOCH,
+          isoDate(new Date()),
+          budget,
+          timeoutMs,
+        );
 
-  for (let page = 1; repositories.length < MAX_REPOS; page += 1) {
-    const url = new URL(GITHUB_SEARCH_URL);
-    url.searchParams.set("q", GITHUB_QUERY);
-    url.searchParams.set("per_page", String(PER_PAGE));
-    url.searchParams.set("page", String(page));
-    url.searchParams.set("sort", "stars");
-    url.searchParams.set("order", "desc");
-
-    const response = await fetchWithTimeout(fetchFn, url, githubRequestInit(token), timeoutMs);
-    if (!response.ok) {
-      throw new Error(`GitHub search failed with status ${response.status}`);
+  const uniqueById = new Map<number, GitHubRepository>();
+  for (const repository of repositories) {
+    if (!isValidGitHubSearchRepository(repository)) {
+      throw new Error("GitHub search returned a malformed repository");
     }
-    const body = await response.json();
-    if (!isObject(body) || typeof body.total_count !== "number" || !Array.isArray(body.items)) {
-      throw new Error("GitHub search returned malformed JSON");
+    const id = readInteger(repository.id);
+    if (id === null || id <= 0) {
+      throw new Error("GitHub search returned a repository without a valid id");
     }
-    if (body.incomplete_results === true) {
-      throw new Error("GitHub search returned incomplete results");
-    }
-
-    totalCount = body.total_count;
-    repositories.push(...body.items.slice(0, MAX_REPOS - repositories.length));
-    if (repositories.length >= totalCount || body.items.length === 0) break;
+    if (!uniqueById.has(id)) uniqueById.set(id, repository);
+  }
+  if (uniqueById.size !== firstPage.totalCount) {
+    throw new Error(
+      `GitHub search inventory changed during collection: expected ${firstPage.totalCount} repositories, collected ${uniqueById.size}`,
+    );
   }
 
   return {
-    repositories,
-    totalCount,
-    truncated: totalCount > repositories.length,
+    repositories: [...uniqueById.values()],
+    totalCount: firstPage.totalCount,
+    truncated: false,
+  };
+}
+
+async function fetchGitHubSearchRange(
+  fetchFn: FetchLike,
+  token: string,
+  createdStart: string,
+  createdEnd: string,
+  budget: GitHubSearchBudget,
+  timeoutMs: number,
+): Promise<GitHubRepository[]> {
+  const query = `${GITHUB_QUERY} created:${createdStart}..${createdEnd}`;
+  const firstPage = await fetchGitHubSearchPage(fetchFn, token, query, 1, budget, timeoutMs);
+  if (firstPage.totalCount <= GITHUB_SEARCH_RESULT_CAP) {
+    return fetchGitHubSearchPages(fetchFn, token, query, firstPage, budget, timeoutMs);
+  }
+  return splitGitHubSearchRange(
+    fetchFn,
+    token,
+    createdStart,
+    createdEnd,
+    budget,
+    timeoutMs,
+  );
+}
+
+async function splitGitHubSearchRange(
+  fetchFn: FetchLike,
+  token: string,
+  createdStart: string,
+  createdEnd: string,
+  budget: GitHubSearchBudget,
+  timeoutMs: number,
+): Promise<GitHubRepository[]> {
+  const firstDay = Date.parse(`${createdStart}T00:00:00Z`);
+  const lastDay = Date.parse(`${createdEnd}T00:00:00Z`);
+  const spanDays = Math.round((lastDay - firstDay) / DAY_MS);
+  if (spanDays < 1) {
+    throw new Error(
+      `GitHub search returned more than ${GITHUB_SEARCH_RESULT_CAP} repositories created on ${createdStart}`,
+    );
+  }
+  const startYear = new Date(firstDay).getUTCFullYear();
+  const endYear = new Date(lastDay).getUTCFullYear();
+  const nextDay =
+    startYear < endYear
+      ? `${endYear}-01-01`
+      : isoDate(new Date(firstDay + (Math.floor(spanDays / 2) + 1) * DAY_MS));
+  const midpoint = isoDate(new Date(Date.parse(`${nextDay}T00:00:00Z`) - DAY_MS));
+  const [older, newer] = await Promise.allSettled([
+    fetchGitHubSearchRange(fetchFn, token, createdStart, midpoint, budget, timeoutMs),
+    fetchGitHubSearchRange(fetchFn, token, nextDay, createdEnd, budget, timeoutMs),
+  ]);
+  if (older.status === "rejected") throw older.reason;
+  if (newer.status === "rejected") throw newer.reason;
+  return [...older.value, ...newer.value];
+}
+
+async function fetchGitHubSearchPages(
+  fetchFn: FetchLike,
+  token: string,
+  query: string,
+  firstPage: GitHubSearchPage,
+  budget: GitHubSearchBudget,
+  timeoutMs: number,
+): Promise<GitHubRepository[]> {
+  const repositories = [...firstPage.repositories];
+  const pageCount = Math.ceil(firstPage.totalCount / PER_PAGE);
+  for (let page = 2; page <= pageCount; page += 1) {
+    const nextPage = await fetchGitHubSearchPage(fetchFn, token, query, page, budget, timeoutMs);
+    if (nextPage.totalCount !== firstPage.totalCount) {
+      throw new Error("GitHub search result count changed while paging");
+    }
+    repositories.push(...nextPage.repositories);
+  }
+  if (repositories.length !== firstPage.totalCount) {
+    throw new Error(
+      `GitHub search returned ${repositories.length} of ${firstPage.totalCount} repositories`,
+    );
+  }
+  return repositories;
+}
+
+async function fetchGitHubSearchPage(
+  fetchFn: FetchLike,
+  token: string,
+  query: string,
+  page: number,
+  budget: GitHubSearchBudget,
+  timeoutMs: number,
+): Promise<GitHubSearchPage> {
+  budget.requests += 1;
+  if (budget.requests > GITHUB_SEARCH_REQUEST_LIMIT) {
+    throw new Error(`GitHub search required more than ${GITHUB_SEARCH_REQUEST_LIMIT} requests`);
+  }
+  const url = new URL(GITHUB_SEARCH_URL);
+  url.searchParams.set("q", query);
+  url.searchParams.set("per_page", String(PER_PAGE));
+  url.searchParams.set("page", String(page));
+  url.searchParams.set("sort", "stars");
+  url.searchParams.set("order", "desc");
+
+  const response = await fetchWithTimeout(fetchFn, url, githubRequestInit(token), timeoutMs);
+  if (!response.ok) {
+    throw new Error(`GitHub search failed with status ${response.status}`);
+  }
+  const body = await response.json();
+  if (
+    !isObject(body) ||
+    !Number.isInteger(body.total_count) ||
+    Number(body.total_count) < 0 ||
+    typeof body.incomplete_results !== "boolean" ||
+    !Array.isArray(body.items)
+  ) {
+    throw new Error("GitHub search returned malformed JSON");
+  }
+  if (body.incomplete_results === true) {
+    throw new Error("GitHub search returned incomplete results");
+  }
+  return {
+    totalCount: Number(body.total_count),
+    repositories: body.items,
   };
 }
 
@@ -1014,6 +1164,38 @@ async function readBlacklistedRepositories(env: Env): Promise<Set<string>> {
   return blockedRepositories;
 }
 
+function isValidGitHubSearchRepository(repo: GitHubRepository): boolean {
+  const fullName = splitFullName(readString(repo.full_name));
+  const owner = isObject(repo.owner) ? readString(repo.owner.login) : null;
+  const name = readString(repo.name);
+  const url = readString(repo.html_url);
+  return (
+    readInteger(repo.id) !== null &&
+    fullName.owner !== null &&
+    fullName.name !== null &&
+    owner !== null &&
+    name !== null &&
+    url !== null &&
+    isValidGitHubRepoUrl(url, owner, name) &&
+    typeof repo.disabled === "boolean" &&
+    typeof repo.archived === "boolean" &&
+    typeof repo.fork === "boolean" &&
+    typeof repo.private === "boolean" &&
+    typeof repo.visibility === "string" &&
+    (repo.default_branch === null || readString(repo.default_branch) !== null) &&
+    (repo.description === null || typeof repo.description === "string") &&
+    (repo.language === null || typeof repo.language === "string") &&
+    isNonNegativeInteger(repo.stargazers_count) &&
+    isNonNegativeInteger(repo.forks_count) &&
+    isNonNegativeInteger(repo.open_issues_count) &&
+    Array.isArray(repo.topics) &&
+    repo.topics.every((topic) => typeof topic === "string") &&
+    isIsoString(repo.created_at) &&
+    isIsoString(repo.updated_at) &&
+    (repo.pushed_at === null || isIsoString(repo.pushed_at))
+  );
+}
+
 function normalizeRepository(repo: GitHubRepository): RepositoryListing | null {
   if (
     readBoolean(repo.disabled) ||
@@ -1234,6 +1416,11 @@ function readInteger(value: unknown): number | null {
   return typeof value === "number" && Number.isInteger(value) ? value : null;
 }
 
+function isNonNegativeInteger(value: unknown): boolean {
+  const integer = readInteger(value);
+  return integer !== null && integer >= 0;
+}
+
 function readNonNegativeInteger(value: unknown): number {
   return readNonNegativeIntegerOrNull(value) ?? 0;
 }
@@ -1247,8 +1434,12 @@ function readBoolean(value: unknown): boolean {
   return value === true;
 }
 
+function isIsoString(value: unknown): boolean {
+  return typeof value === "string" && !Number.isNaN(Date.parse(value));
+}
+
 function readIsoString(value: unknown): string | null {
-  return typeof value === "string" && !Number.isNaN(Date.parse(value)) ? value : null;
+  return isIsoString(value) ? value as string : null;
 }
 
 function isHerdrVersion(value: string): boolean {
