@@ -522,10 +522,8 @@ impl WindowsInputPump {
         let Some(index) = matching_key_index(&self.consumed_default_mouse_keys, record) else {
             return false;
         };
-        if !record.key_down {
-            self.consumed_default_mouse_keys.remove(index);
-        }
-        true
+        self.consumed_default_mouse_keys.remove(index);
+        !record.key_down
     }
 
     fn raw_events_to_client_events(
@@ -3241,7 +3239,6 @@ mod tests {
         let mut records = win32_input_mode_encoded_raw_bytes(b"\x1b[MCK");
         for record in [
             payload_down,
-            payload_down,
             WindowsKeyRecord {
                 key_down: false,
                 ..payload_down
@@ -3258,6 +3255,57 @@ mod tests {
                 row: 16,
                 modifiers: 0,
             }]
+        );
+    }
+
+    #[test]
+    fn vti_missing_mouse_payload_release_does_not_consume_next_press() {
+        let payload_down = WindowsKeyRecord {
+            key_down: true,
+            repeat_count: 1,
+            virtual_key_code: 0x31,
+            virtual_scan_code: 0x02,
+            unicode: '!' as u16,
+            control_key_state: 0x0010,
+        };
+        let mut records = win32_input_mode_encoded_raw_bytes(b"\x1b[MCK");
+        for record in [
+            payload_down,
+            payload_down,
+            WindowsKeyRecord {
+                key_down: false,
+                ..payload_down
+            },
+        ] {
+            records.extend(win32_input_mode_encoded_record(record));
+        }
+
+        assert_eq!(
+            translate(records),
+            vec![
+                crate::protocol::ClientInputEvent::Mouse {
+                    kind: crate::protocol::ClientMouseKind::Moved,
+                    column: 42,
+                    row: 0,
+                    modifiers: 0,
+                },
+                crate::protocol::ClientInputEvent::Key {
+                    code: crate::protocol::ClientKeyCode::Char('!'),
+                    modifiers: crossterm::event::KeyModifiers::SHIFT.bits(),
+                    kind: crate::protocol::ClientKeyKind::Press,
+                    repeat_count: 1,
+                    generated_text: Some("!".into()),
+                    source: crate::protocol::ClientKeySource::Synthesized,
+                },
+                crate::protocol::ClientInputEvent::Key {
+                    code: crate::protocol::ClientKeyCode::Char('!'),
+                    modifiers: crossterm::event::KeyModifiers::SHIFT.bits(),
+                    kind: crate::protocol::ClientKeyKind::Release,
+                    repeat_count: 1,
+                    generated_text: None,
+                    source: crate::protocol::ClientKeySource::Synthesized,
+                },
+            ]
         );
     }
 
@@ -3336,7 +3384,6 @@ mod tests {
         };
         let mut records = win32_input_mode_encoded_raw_bytes(b"\x1b[MCK");
         for record in [
-            payload_down,
             payload_down,
             shift_up,
             WindowsKeyRecord {
