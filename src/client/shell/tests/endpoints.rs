@@ -256,6 +256,54 @@ fn sidebar_renders_local_and_saved_ssh_endpoints_with_status() {
 }
 
 #[test]
+fn saved_machine_preserves_collapsed_local_worktree_groups() {
+    let (mut state, _) = state_with_remote();
+    let mut local = snapshot();
+    local.workspaces[0].worktree = Some(ClientShellWorktree {
+        key: "repo".into(),
+        label: "repo".into(),
+        is_linked_worktree: false,
+    });
+    let mut child = local.workspaces[0].clone();
+    child.workspace_id = "ws_2".into();
+    child.active_tab_id = "tab_2".into();
+    child.number = 2;
+    child.label = "feature".into();
+    child.focused = false;
+    child.agent_status = AgentStatus::Blocked;
+    child.worktree = Some(ClientShellWorktree {
+        key: "repo".into(),
+        label: "repo".into(),
+        is_linked_worktree: true,
+    });
+    local.workspaces.push(child);
+    state.set_snapshot(Box::new(local));
+    state.collapsed_groups.insert("repo".into());
+
+    let frame = state
+        .compose(100, 28)
+        .expect("collapsed local worktree group");
+
+    assert!(!state
+        .hits
+        .workspaces
+        .iter()
+        .any(|hit| { hit.endpoint_id == ClientEndpointId::Local && hit.workspace_id == "ws_2" }));
+    let parent = state
+        .hits
+        .workspaces
+        .iter()
+        .find(|hit| hit.endpoint_id == ClientEndpointId::Local && hit.workspace_id == "ws_1")
+        .expect("local parent workspace");
+    let (toggle, key) = parent.group_toggle.as_ref().expect("worktree group marker");
+    assert_eq!(key, "repo");
+    let buffer = frame.to_ratatui_buffer().expect("frame should reconstruct");
+    assert_eq!(buffer[(toggle.x, toggle.y)].symbol(), "▸");
+    assert!((parent.rect.x..parent.rect.right())
+        .any(|x| buffer[(x, parent.rect.y)].fg == state.config.palette.red));
+}
+
+#[test]
 fn active_workspace_is_the_only_highlight_when_machine_is_expanded() {
     let (mut state, endpoint_id) = state_with_remote();
     assert!(state.activate_endpoint_projection(&endpoint_id));
