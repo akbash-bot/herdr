@@ -73,7 +73,16 @@ pub(super) fn render_collapsed(
             }
             let rect = Rect::new(workspace_area.x, y, workspace_area.width, 1);
             let focused = active && workspace.focused;
-            if focused {
+            let selected =
+                active && state.selected_workspace_id == Some(workspace.workspace_id.as_str());
+            let selection_background = if palette.selection_bg == ratatui::style::Color::Reset {
+                palette.active_row_bg
+            } else {
+                palette.selection_bg
+            };
+            if selected {
+                buffer.set_style(rect, Style::default().bg(selection_background));
+            } else if focused {
                 buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
             }
             let stale = endpoint.status != ClientEndpointStatus::Online;
@@ -338,6 +347,8 @@ pub(super) fn render_expanded(
                     rect.height,
                 );
                 let endpoint_active = &endpoint.endpoint_id == state.active_endpoint_id;
+                let selected = endpoint_active
+                    && state.selected_workspace_id == Some(workspace.workspace_id.as_str());
                 super::sidebar::render_workspace_rows(
                     buffer,
                     nested,
@@ -347,10 +358,13 @@ pub(super) fn render_expanded(
                     entry,
                     tokens,
                     endpoint_active,
-                    false,
+                    selected,
                     false,
                     palette,
                 );
+                if selected && palette.selection_bg == ratatui::style::Color::Reset {
+                    buffer.set_style(nested, Style::default().bg(palette.active_row_bg));
+                }
                 if endpoint.status != ClientEndpointStatus::Online {
                     buffer.set_style(
                         rect,

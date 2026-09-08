@@ -484,6 +484,90 @@ fn active_workspace_is_the_only_highlight_when_machine_is_expanded() {
 }
 
 #[test]
+fn aggregate_sidebar_highlights_only_the_active_endpoint_navigation_selection() {
+    for sidebar_collapsed in [true, false] {
+        let (mut state, remote_id) = state_with_remote();
+        let mut local = snapshot();
+        let mut second = local.workspaces[0].clone();
+        second.workspace_id = "ws_2".into();
+        second.number = 2;
+        second.label = "second".into();
+        second.focused = false;
+        local.workspaces.push(second);
+        state.set_snapshot(Box::new(local));
+        let remote = state
+            .endpoints
+            .iter_mut()
+            .find(|endpoint| endpoint.endpoint_id == remote_id)
+            .and_then(|endpoint| endpoint.snapshot.as_mut())
+            .expect("remote snapshot");
+        let mut remote_collision = remote.workspaces[0].clone();
+        remote_collision.workspace_id = "ws_2".into();
+        remote_collision.number = 2;
+        remote_collision.focused = false;
+        remote.workspaces.push(remote_collision);
+        state.sidebar_collapsed = sidebar_collapsed;
+
+        assert!(state.handle_input_bytes(&[0x02]).actions.is_empty());
+        assert!(state.handle_input_bytes(b"w").actions.is_empty());
+        let movement = state.handle_input_bytes(b"\x1b[B");
+        assert!(movement.repaint);
+        assert!(movement.actions.is_empty());
+        assert!(movement.requests.is_empty());
+        assert_eq!(state.mode, ClientShellMode::Navigate);
+        assert_eq!(state.navigate_workspace_id.as_deref(), Some("ws_2"));
+        assert_eq!(state.active_endpoint_id, ClientEndpointId::Local);
+        assert_eq!(
+            state
+                .snapshot
+                .as_deref()
+                .and_then(|snapshot| snapshot.focused_workspace_id.as_deref()),
+            Some("ws_1")
+        );
+
+        let frame = state.compose(100, 28).expect("aggregate sidebar");
+        let workspace_rect = |endpoint_id: &ClientEndpointId, workspace_id: &str| {
+            state
+                .hits
+                .workspaces
+                .iter()
+                .find(|hit| &hit.endpoint_id == endpoint_id && hit.workspace_id == workspace_id)
+                .expect("workspace row")
+                .rect
+        };
+        let selected = workspace_rect(&ClientEndpointId::Local, "ws_2");
+        let focused = workspace_rect(&ClientEndpointId::Local, "ws_1");
+        let remote_collision = workspace_rect(&remote_id, "ws_2");
+        let buffer = frame.to_ratatui_buffer().expect("frame buffer");
+        let content_x = |rect: Rect| rect.x.saturating_add(2).min(rect.right() - 1);
+        assert_eq!(
+            buffer[(content_x(selected), selected.y)].bg,
+            state.config.palette.selection_bg
+        );
+        assert_eq!(
+            buffer[(content_x(focused), focused.y)].bg,
+            state.config.palette.active_row_bg
+        );
+        assert_ne!(
+            buffer[(content_x(remote_collision), remote_collision.y)].bg,
+            state.config.palette.selection_bg
+        );
+
+        state.config.palette.selection_bg = ratatui::style::Color::Reset;
+        let reset_frame = state.compose(100, 28).expect("terminal-theme sidebar");
+        let reset_buffer = reset_frame.to_ratatui_buffer().expect("frame buffer");
+        assert_eq!(
+            reset_buffer[(content_x(selected), selected.y)].bg,
+            state.config.palette.active_row_bg
+        );
+        assert_ne!(
+            reset_buffer[(content_x(remote_collision), remote_collision.y)].bg,
+            state.config.palette.active_row_bg
+        );
+    }
+}
+
+#[test]
 fn aggregate_agents_use_configured_rows_machine_token_and_status_colors() {
     use crate::api::schema::AgentStatus;
     use crate::config::{AgentSidebarToken, StatusIndicatorStyle};
