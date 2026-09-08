@@ -647,7 +647,7 @@ fn unselected_endpoint_completion_projects_done_client_side() {
 }
 
 #[test]
-fn clicking_remote_endpoint_requests_activation_without_mutating_projection() {
+fn clicking_remote_machine_name_requests_activation_without_mutating_projection() {
     let (mut state, endpoint_id) = state_with_remote();
     state.compose(100, 28).expect("combined endpoint frame");
     let hit = state
@@ -659,7 +659,7 @@ fn clicking_remote_endpoint_requests_activation_without_mutating_projection() {
         .rect;
     let outcome = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
-        column: hit.x,
+        column: hit.x + 3,
         row: hit.y,
         modifiers: KeyModifiers::empty(),
     })]);
@@ -678,6 +678,87 @@ fn clicking_remote_endpoint_requests_activation_without_mutating_projection() {
             .map(|snapshot| snapshot.boot_id.as_str()),
         Some("boot-1")
     );
+}
+
+#[test]
+fn machine_arrow_toggles_inactive_machine_without_switching() {
+    for sidebar_collapsed in [false, true] {
+        for status in [
+            ClientEndpointStatus::Online,
+            ClientEndpointStatus::Reconnecting,
+        ] {
+            let (mut state, remote_id) = state_with_remote();
+            let mut other_profile = remote_profile();
+            other_profile.id = ProfileId::parse("1123456789abcdef0123456789abcdef").unwrap();
+            let other_id = ClientEndpointId::Ssh(other_profile.id.clone());
+            state.set_endpoint_catalog(&[remote_profile(), other_profile]);
+            state.set_endpoint_status(&other_id, ClientEndpointStatus::Online);
+            state.set_endpoint_snapshot(&other_id, Box::new(snapshot()));
+            state.set_endpoint_status(&remote_id, status);
+            state.sidebar_collapsed = sidebar_collapsed;
+
+            for collapsed in [true, false] {
+                let frame = state.compose(100, 28).expect("three machine frame");
+                let machine = state
+                    .hits
+                    .machines
+                    .iter()
+                    .find(|hit| hit.endpoint_id == remote_id)
+                    .expect("remote machine")
+                    .rect;
+                let column = machine.x + u16::from(!sidebar_collapsed);
+                let buffer = frame.to_ratatui_buffer().expect("frame buffer");
+                assert_eq!(
+                    buffer[(column, machine.y)].symbol(),
+                    if collapsed { "▾" } else { "▸" }
+                );
+                let outcome = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column,
+                    row: machine.y,
+                    modifiers: KeyModifiers::empty(),
+                })]);
+                assert!(
+                    outcome.actions.is_empty(),
+                    "collapse must not switch machines"
+                );
+                assert!(outcome.requests.is_empty());
+                assert!(outcome.repaint);
+                assert_eq!(state.active_endpoint_id, ClientEndpointId::Local);
+                assert_eq!(state.snapshot.as_ref().unwrap().boot_id, "boot-1");
+                assert_eq!(
+                    state
+                        .snapshot
+                        .as_ref()
+                        .unwrap()
+                        .focused_workspace_id
+                        .as_deref(),
+                    Some("ws_1")
+                );
+                assert_eq!(state.collapsed_endpoints.contains(&remote_id), collapsed);
+                assert!(!state.collapsed_endpoints.contains(&ClientEndpointId::Local));
+                assert!(!state.collapsed_endpoints.contains(&other_id));
+                assert!(state.endpoint_error.is_none());
+
+                state.compose(100, 28).expect("toggled machine frame");
+                assert_eq!(
+                    state
+                        .hits
+                        .workspaces
+                        .iter()
+                        .any(|hit| hit.endpoint_id == remote_id),
+                    !collapsed
+                );
+                for endpoint_id in [&ClientEndpointId::Local, &other_id] {
+                    assert!(state
+                        .hits
+                        .workspaces
+                        .iter()
+                        .any(|hit| &hit.endpoint_id == endpoint_id));
+                }
+            }
+        }
+    }
 }
 
 #[test]
