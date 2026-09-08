@@ -1,6 +1,17 @@
 use super::render::{display_width, put_right_text, put_text, ShellRenderState};
 use super::*;
 
+fn collapsed_groups_for_endpoint<'a>(
+    state: &'a ShellRenderState<'_>,
+    endpoint_id: &ClientEndpointId,
+) -> Option<&'a HashSet<String>> {
+    if endpoint_id.is_local() {
+        Some(state.collapsed_groups)
+    } else {
+        state.remote_collapsed_groups.get(endpoint_id)
+    }
+}
+
 pub(super) fn render_collapsed(
     buffer: &mut Buffer,
     area: Rect,
@@ -178,6 +189,8 @@ pub(super) fn render_expanded(
             .add_modifier(Modifier::BOLD),
     );
 
+    let empty_collapsed_groups = HashSet::new();
+
     enum Row {
         Endpoint(usize),
         Workspace {
@@ -192,8 +205,10 @@ pub(super) fn render_expanded(
             continue;
         }
         if let Some(snapshot) = endpoint.snapshot.as_deref() {
+            let collapsed_groups = collapsed_groups_for_endpoint(state, &endpoint.endpoint_id)
+                .unwrap_or(&empty_collapsed_groups);
             rows.extend(
-                super::sidebar::workspace_entries(snapshot, state.collapsed_groups)
+                super::sidebar::workspace_entries(snapshot, collapsed_groups)
                     .into_iter()
                     .map(|entry| Row::Workspace {
                         endpoint: endpoint_index,
@@ -215,28 +230,33 @@ pub(super) fn render_expanded(
         .iter()
         .map(|row| match row {
             Row::Endpoint(_) => 1,
-            Row::Workspace { endpoint, entry } => state.endpoints[*endpoint]
-                .snapshot
-                .as_deref()
-                .and_then(|snapshot| {
-                    let workspace = snapshot.workspaces.get(entry.index)?;
-                    Some(
-                        super::sidebar::workspace_rows(
-                            workspace,
-                            super::sidebar::displayed_workspace_status(
-                                snapshot,
+            Row::Workspace { endpoint, entry } => {
+                let endpoint = &state.endpoints[*endpoint];
+                let collapsed_groups = collapsed_groups_for_endpoint(state, &endpoint.endpoint_id)
+                    .unwrap_or(&empty_collapsed_groups);
+                endpoint
+                    .snapshot
+                    .as_deref()
+                    .and_then(|snapshot| {
+                        let workspace = snapshot.workspaces.get(entry.index)?;
+                        Some(
+                            super::sidebar::workspace_rows(
                                 workspace,
-                                state.collapsed_groups,
-                            ),
-                            entry.indented,
-                            &config.spaces,
+                                super::sidebar::displayed_workspace_status(
+                                    snapshot,
+                                    workspace,
+                                    collapsed_groups,
+                                ),
+                                entry.indented,
+                                &config.spaces,
+                            )
+                            .len()
+                            .max(1)
+                            .min(u16::MAX as usize) as u16,
                         )
-                        .len()
-                        .max(1)
-                        .min(u16::MAX as usize) as u16,
-                    )
-                })
-                .unwrap_or(1),
+                    })
+                    .unwrap_or(1)
+            }
         })
         .collect::<Vec<_>>();
     let gaps = vec![0; rows.len()];
@@ -286,10 +306,12 @@ pub(super) fn render_expanded(
                 let Some(workspace) = snapshot.workspaces.get(entry.index) else {
                     continue;
                 };
+                let collapsed_groups = collapsed_groups_for_endpoint(state, &endpoint.endpoint_id)
+                    .unwrap_or(&empty_collapsed_groups);
                 let status = super::sidebar::displayed_workspace_status(
                     snapshot,
                     workspace,
-                    state.collapsed_groups,
+                    collapsed_groups,
                 );
                 let tokens = super::sidebar::workspace_rows(
                     workspace,
@@ -335,7 +357,7 @@ pub(super) fn render_expanded(
                     rect,
                     snapshot,
                     entry.index,
-                    state.collapsed_groups,
+                    collapsed_groups,
                     palette,
                 );
                 hits.workspaces.push(WorkspaceHit {

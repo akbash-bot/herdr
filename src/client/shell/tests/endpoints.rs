@@ -256,51 +256,182 @@ fn sidebar_renders_local_and_saved_ssh_endpoints_with_status() {
 }
 
 #[test]
-fn saved_machine_preserves_collapsed_local_worktree_groups() {
-    let (mut state, _) = state_with_remote();
+fn saved_machine_preserves_endpoint_scoped_worktree_collapses() {
+    fn add_worktree_group(snapshot: &mut ClientShellSnapshot, parent_id: &str, child_id: &str) {
+        snapshot.workspaces[0].workspace_id = parent_id.into();
+        snapshot.workspaces[0].worktree = Some(ClientShellWorktree {
+            key: "repo".into(),
+            label: "repo".into(),
+            is_linked_worktree: false,
+        });
+        let mut child = snapshot.workspaces[0].clone();
+        child.workspace_id = child_id.into();
+        child.active_tab_id = format!("tab_{child_id}");
+        child.number = 2;
+        child.label = "feature".into();
+        child.focused = false;
+        child.agent_status = AgentStatus::Blocked;
+        child.worktree = Some(ClientShellWorktree {
+            key: "repo".into(),
+            label: "repo".into(),
+            is_linked_worktree: true,
+        });
+        snapshot.workspaces.push(child);
+    }
+
+    let (mut state, remote_id) = state_with_remote();
     let mut local = snapshot();
-    local.workspaces[0].worktree = Some(ClientShellWorktree {
-        key: "repo".into(),
-        label: "repo".into(),
-        is_linked_worktree: false,
-    });
-    let mut child = local.workspaces[0].clone();
-    child.workspace_id = "ws_2".into();
-    child.active_tab_id = "tab_2".into();
-    child.number = 2;
-    child.label = "feature".into();
-    child.focused = false;
-    child.agent_status = AgentStatus::Blocked;
-    child.worktree = Some(ClientShellWorktree {
-        key: "repo".into(),
-        label: "repo".into(),
-        is_linked_worktree: true,
-    });
-    local.workspaces.push(child);
+    add_worktree_group(&mut local, "ws_1", "ws_2");
     state.set_snapshot(Box::new(local));
-    state.collapsed_groups.insert("repo".into());
+    let mut remote = snapshot();
+    remote.boot_id = "remote-boot".into();
+    remote.focused_workspace_id = Some("remote_ws_1".into());
+    add_worktree_group(&mut remote, "remote_ws_1", "remote_ws_2");
+    state.set_endpoint_snapshot(&remote_id, Box::new(remote));
+
+    state.open_workspace_context_menu("ws_1".into(), 0, 0);
+    let toggle_index = match state.overlay.as_ref() {
+        Some(ClientShellOverlay::ContextMenu(menu)) => menu
+            .items()
+            .iter()
+            .position(|item| item.action == ClientContextMenuAction::ToggleGroup)
+            .expect("collapse menu item"),
+        _ => panic!("workspace context menu"),
+    };
+    state.activate_context_menu_item(toggle_index, &mut ClientShellInput::default());
 
     let frame = state
         .compose(100, 28)
         .expect("collapsed local worktree group");
-
     assert!(!state
         .hits
         .workspaces
         .iter()
         .any(|hit| { hit.endpoint_id == ClientEndpointId::Local && hit.workspace_id == "ws_2" }));
-    let parent = state
+    assert!(state
+        .hits
+        .workspaces
+        .iter()
+        .any(|hit| hit.endpoint_id == remote_id && hit.workspace_id == "remote_ws_2"));
+    let local_parent = state
         .hits
         .workspaces
         .iter()
         .find(|hit| hit.endpoint_id == ClientEndpointId::Local && hit.workspace_id == "ws_1")
         .expect("local parent workspace");
-    let (toggle, key) = parent.group_toggle.as_ref().expect("worktree group marker");
+    let (local_toggle, key) = local_parent
+        .group_toggle
+        .as_ref()
+        .expect("local worktree group marker");
     assert_eq!(key, "repo");
     let buffer = frame.to_ratatui_buffer().expect("frame should reconstruct");
-    assert_eq!(buffer[(toggle.x, toggle.y)].symbol(), "▸");
-    assert!((parent.rect.x..parent.rect.right())
-        .any(|x| buffer[(x, parent.rect.y)].fg == state.config.palette.red));
+    assert_eq!(buffer[(local_toggle.x, local_toggle.y)].symbol(), "▸");
+    assert!((local_parent.rect.x..local_parent.rect.right())
+        .any(|x| buffer[(x, local_parent.rect.y)].fg == state.config.palette.red));
+
+    assert!(state.activate_endpoint_projection(&remote_id));
+    let mut remote_surface = surface();
+    remote_surface.boot_id = "remote-boot".into();
+    state.set_pane_surface(remote_surface);
+    state
+        .compose(100, 28)
+        .expect("active remote worktree group");
+    let mut switch = ClientShellInput::default();
+    state.record_binding(
+        crate::input::KeybindMatch::Action(crate::input::KeybindAction::SwitchWorkspace(1)),
+        &mut switch,
+    );
+    assert!(matches!(
+        &switch.actions[..],
+        [ClientShellAction::Endpoint { request, .. }]
+            if matches!(
+                &request.method,
+                crate::api::schema::Method::WorkspaceFocus(target)
+                    if target.workspace_id == "remote_ws_2"
+            )
+    ));
+    let remote_parent = state
+        .hits
+        .workspaces
+        .iter()
+        .find(|hit| hit.endpoint_id == remote_id && hit.workspace_id == "remote_ws_1")
+        .expect("visible remote worktree parent")
+        .rect;
+    let remote_child = state
+        .hits
+        .workspaces
+        .iter()
+        .find(|hit| hit.endpoint_id == remote_id && hit.workspace_id == "remote_ws_2")
+        .expect("visible remote worktree child")
+        .rect;
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: remote_parent.x + 3,
+        row: remote_parent.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: remote_child.x + 3,
+        row: remote_child.bottom(),
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(matches!(
+        state.chrome_drag,
+        Some(ClientChromeDrag::Workspace {
+            target: Some(_),
+            ..
+        })
+    ));
+    state.chrome_drag = None;
+    state.workspace_press = None;
+
+    let remote_toggle = state
+        .hits
+        .workspaces
+        .iter()
+        .find(|hit| hit.endpoint_id == remote_id && hit.workspace_id == "remote_ws_1")
+        .and_then(|hit| hit.group_toggle.as_ref())
+        .expect("remote worktree group marker")
+        .0;
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: remote_toggle.x,
+        row: remote_toggle.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    state.compose(100, 28).expect("both groups collapsed");
+    assert!(!state
+        .hits
+        .workspaces
+        .iter()
+        .any(|hit| { hit.endpoint_id == remote_id && hit.workspace_id == "remote_ws_2" }));
+
+    let local_toggle = state
+        .hits
+        .workspaces
+        .iter()
+        .find(|hit| hit.endpoint_id == ClientEndpointId::Local && hit.workspace_id == "ws_1")
+        .and_then(|hit| hit.group_toggle.as_ref())
+        .expect("collapsed local group marker")
+        .0;
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: local_toggle.x,
+        row: local_toggle.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    state.compose(100, 28).expect("only remote group collapsed");
+    assert!(state
+        .hits
+        .workspaces
+        .iter()
+        .any(|hit| { hit.endpoint_id == ClientEndpointId::Local && hit.workspace_id == "ws_2" }));
+    assert!(!state
+        .hits
+        .workspaces
+        .iter()
+        .any(|hit| { hit.endpoint_id == remote_id && hit.workspace_id == "remote_ws_2" }));
 }
 
 #[test]
