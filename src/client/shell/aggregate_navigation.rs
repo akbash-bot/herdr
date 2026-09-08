@@ -242,18 +242,17 @@ impl crate::agent_view_eval::AgentViewEntry for ClientAgentViewEntry<'_> {
         self.snapshot
             .tabs
             .iter()
-            .filter(|tab| tab.workspace_id == self.agent.workspace_id)
-            .position(|tab| tab.tab_id == self.agent.tab_id)
-            .map(|index| index as u64)
+            .find(|tab| tab.tab_id == self.agent.tab_id)
+            .map(|tab| tab.number as u64)
     }
 
     fn pane_order(&self) -> Option<u64> {
-        self.snapshot
-            .panes
-            .iter()
-            .filter(|pane| pane.tab_id == self.agent.tab_id)
-            .position(|pane| pane.pane_id == self.agent.pane_id)
-            .map(|index| index as u64)
+        let suffix = self
+            .agent
+            .pane_id
+            .strip_prefix(&self.agent.workspace_id)?
+            .strip_prefix(":p")?;
+        crate::workspace::decode_public_number(suffix).map(|number| number as u64)
     }
 
     fn attention(&self) -> u64 {
