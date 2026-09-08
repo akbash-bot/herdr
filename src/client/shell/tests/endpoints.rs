@@ -1,4 +1,7 @@
 use super::*;
+
+#[path = "workspace_navigation.rs"]
+mod workspace_navigation;
 use crate::client::endpoint::{
     ClientEndpointId, ClientEndpointStatus, ProfileId, SavedSshEndpoint,
 };
@@ -50,6 +53,101 @@ fn state_with_remote() -> (ClientShellState, ClientEndpointId) {
     remote.workspaces[0].label = "remote-workspace".into();
     state.set_endpoint_snapshot(&endpoint_id, Box::new(remote));
     (state, endpoint_id)
+}
+
+#[test]
+fn navigate_mode_previews_foreign_workspace_then_activates_on_enter() {
+    for (collapsed, cols) in [(true, 100), (false, 100), (false, 44)] {
+        let (mut state, remote_id) = state_with_remote();
+        state.sidebar_collapsed = collapsed;
+        state.compose(cols, 28).expect("initial frame");
+        for input in [&[0x02][..], b"w", b"\x1b[B"] {
+            let movement = state.handle_input_bytes(input);
+            assert!(movement.actions.is_empty());
+            assert!(movement.requests.is_empty());
+        }
+        assert_eq!(state.mode, ClientShellMode::Navigate);
+        assert_eq!(
+            state.navigate_workspace_id,
+            state.navigation_target(&remote_id, "ws_1")
+        );
+        assert_eq!(state.active_endpoint_id, ClientEndpointId::Local);
+        assert_eq!(state.snapshot.as_ref().unwrap().boot_id, "boot-1");
+        assert_eq!(
+            state
+                .snapshot
+                .as_ref()
+                .unwrap()
+                .focused_workspace_id
+                .as_deref(),
+            Some("ws_1")
+        );
+        assert_eq!(state.pane_surface.as_ref().unwrap().boot_id, "boot-1");
+        let frame = state.compose(cols, 28).expect("foreign preview");
+        let buffer = frame.to_ratatui_buffer().unwrap();
+        if cols == 44 {
+            let remote = state
+                .hits
+                .mobile_targets
+                .iter()
+                .find_map(|(rect, target)| {
+                    matches!(target, ClientMobileTarget::Workspace { endpoint_id, workspace_id }
+                    if endpoint_id == &remote_id && workspace_id == "ws_1")
+                    .then_some(*rect)
+                })
+                .expect("foreign mobile row");
+            assert_eq!(
+                buffer[(remote.x + 2, remote.y)].bg,
+                state.config.palette.surface0
+            );
+            state.config.palette = Palette::terminal();
+            let terminal_frame = state.compose(cols, 28).unwrap();
+            let terminal_buffer = terminal_frame.to_ratatui_buffer().unwrap();
+            assert_eq!(
+                terminal_buffer[(remote.x + 2, remote.y)].bg,
+                state.config.palette.active_row_bg
+            );
+        } else {
+            let remote = state
+                .hits
+                .workspaces
+                .iter()
+                .find(|hit| hit.endpoint_id == remote_id)
+                .unwrap()
+                .rect;
+            let local = state
+                .hits
+                .workspaces
+                .iter()
+                .find(|hit| hit.endpoint_id.is_local())
+                .unwrap()
+                .rect;
+            assert_eq!(
+                buffer[(remote.x + 2, remote.y)].bg,
+                state.config.palette.selection_bg
+            );
+            assert_eq!(
+                buffer[(local.x + 2, local.y)].bg,
+                state.config.palette.active_row_bg
+            );
+        }
+        let enter = state.handle_input_bytes(b"\r");
+        assert!(enter.requests.is_empty());
+        assert!(matches!(
+            enter.actions.as_slice(),
+            [ClientShellAction::ActivateEndpoint {
+                endpoint_id,
+                target: Some(ClientEndpointFocusTarget::Workspace(workspace_id)),
+            }] if endpoint_id == &remote_id && workspace_id == "ws_1"
+        ));
+        assert_eq!(state.mode, ClientShellMode::Terminal);
+        assert!(state.navigate_workspace_id.is_none());
+        assert_eq!(
+            state.active_endpoint_id,
+            ClientEndpointId::Local,
+            "only coherent activation can change the displayed machine"
+        );
+    }
 }
 
 #[test]
@@ -515,7 +613,10 @@ fn aggregate_sidebar_highlights_only_the_active_endpoint_navigation_selection() 
         assert!(movement.actions.is_empty());
         assert!(movement.requests.is_empty());
         assert_eq!(state.mode, ClientShellMode::Navigate);
-        assert_eq!(state.navigate_workspace_id.as_deref(), Some("ws_2"));
+        assert_eq!(
+            state.navigate_workspace_id,
+            state.navigation_target(&ClientEndpointId::Local, "ws_2")
+        );
         assert_eq!(state.active_endpoint_id, ClientEndpointId::Local);
         assert_eq!(
             state

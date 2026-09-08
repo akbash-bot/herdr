@@ -682,18 +682,7 @@ impl ClientShellState {
         if modifiers.is_empty() {
             match code {
                 KeyCode::Enter => {
-                    let selected = self.navigate_workspace_id.clone();
-                    self.mode = ClientShellMode::Terminal;
-                    self.navigate_workspace_id = None;
-                    if let Some(workspace_id) = selected {
-                        self.push_endpoint_method(
-                            crate::api::schema::Method::WorkspaceFocus(
-                                crate::api::schema::WorkspaceTarget { workspace_id },
-                            ),
-                            outcome,
-                        );
-                    }
-                    outcome.repaint = true;
+                    self.accept_navigate_workspace(outcome);
                     return;
                 }
                 KeyCode::Tab => {
@@ -804,6 +793,17 @@ impl ClientShellState {
         if !self.indexed_navigation_target_exists(&binding) {
             return;
         }
+        if self.workspace_preview_action_blocked()
+            && matches!(
+                binding,
+                KeybindMatch::Action(
+                    KeybindAction::RenameWorkspace | KeybindAction::CloseWorkspace
+                )
+            )
+        {
+            self.record_binding(binding, outcome);
+            return;
+        }
 
         if let KeybindMatch::Action(KeybindAction::CyclePaneNext) = binding {
             self.cycle_pane(false, outcome);
@@ -859,39 +859,6 @@ impl ClientShellState {
                 .is_some()
             }
             _ => true,
-        }
-    }
-
-    fn move_navigate_workspace(&mut self, delta: isize) {
-        let Some(snapshot) = self.snapshot.as_deref() else {
-            return;
-        };
-        let mobile = self.mobile_layout_active();
-        let entries = self.navigation_workspace_entries(snapshot);
-        if entries.is_empty() {
-            return;
-        }
-        let current = self
-            .navigate_workspace_id
-            .as_deref()
-            .and_then(|selected| {
-                entries
-                    .iter()
-                    .position(|entry| snapshot.workspaces[entry.index].workspace_id == selected)
-            })
-            .unwrap_or(0);
-        let next = if mobile {
-            (current as isize + delta).clamp(0, entries.len().saturating_sub(1) as isize) as usize
-        } else {
-            (current as isize + delta).rem_euclid(entries.len() as isize) as usize
-        };
-        let workspace_id = snapshot.workspaces[entries[next].index]
-            .workspace_id
-            .clone();
-        self.navigate_workspace_id = Some(workspace_id.clone());
-        self.reveal_mobile_workspace = mobile;
-        if !mobile {
-            self.reveal_workspace(&workspace_id);
         }
     }
 
