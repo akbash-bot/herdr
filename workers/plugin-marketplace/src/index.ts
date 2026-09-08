@@ -12,7 +12,8 @@ const BLACKLIST_REPO_KEY_PREFIX = "repo:";
 const PLUGIN_MANIFEST_FILE = "herdr-plugin.toml";
 const PER_PAGE = 100;
 const GITHUB_SEARCH_RESULT_CAP = 1000;
-const GITHUB_SEARCH_REQUEST_LIMIT = 30;
+const GITHUB_SEARCH_MAX_RATE_LIMIT_WAIT_MS = 65_000;
+const GITHUB_SEARCH_RATE_LIMIT_GRACE_MS = 1_000;
 const GITHUB_REPOSITORY_EPOCH = "2007-01-01";
 const GRAPHQL_BATCH_SIZE = 50;
 const NETWORK_CONCURRENCY = 5;
@@ -394,8 +395,9 @@ type GitHubSearchPage = {
   repositories: GitHubRepository[];
 };
 
-type GitHubSearchBudget = {
-  requests: number;
+type GitHubSearchSchedule = {
+  tail: Promise<void>;
+  blockedUntilMs: number;
 };
 
 async function fetchGitHubRepositories(
@@ -403,13 +405,16 @@ async function fetchGitHubRepositories(
   token: string,
   timeoutMs = REQUEST_TIMEOUT_MS,
 ): Promise<{ repositories: GitHubRepository[]; totalCount: number; truncated: boolean }> {
-  const budget: GitHubSearchBudget = { requests: 0 };
+  const schedule: GitHubSearchSchedule = {
+    tail: Promise.resolve(),
+    blockedUntilMs: 0,
+  };
   const firstPage = await fetchGitHubSearchPage(
     fetchFn,
     token,
     GITHUB_QUERY,
     1,
-    budget,
+    schedule,
     timeoutMs,
   );
   const repositories =
@@ -419,7 +424,7 @@ async function fetchGitHubRepositories(
           token,
           GITHUB_QUERY,
           firstPage,
-          budget,
+          schedule,
           timeoutMs,
         )
       : await splitGitHubSearchRange(
@@ -427,7 +432,7 @@ async function fetchGitHubRepositories(
           token,
           GITHUB_REPOSITORY_EPOCH,
           isoDate(new Date()),
-          budget,
+          schedule,
           timeoutMs,
         );
 
@@ -460,20 +465,20 @@ async function fetchGitHubSearchRange(
   token: string,
   createdStart: string,
   createdEnd: string,
-  budget: GitHubSearchBudget,
+  schedule: GitHubSearchSchedule,
   timeoutMs: number,
 ): Promise<GitHubRepository[]> {
   const query = `${GITHUB_QUERY} created:${createdStart}..${createdEnd}`;
-  const firstPage = await fetchGitHubSearchPage(fetchFn, token, query, 1, budget, timeoutMs);
+  const firstPage = await fetchGitHubSearchPage(fetchFn, token, query, 1, schedule, timeoutMs);
   if (firstPage.totalCount <= GITHUB_SEARCH_RESULT_CAP) {
-    return fetchGitHubSearchPages(fetchFn, token, query, firstPage, budget, timeoutMs);
+    return fetchGitHubSearchPages(fetchFn, token, query, firstPage, schedule, timeoutMs);
   }
   return splitGitHubSearchRange(
     fetchFn,
     token,
     createdStart,
     createdEnd,
-    budget,
+    schedule,
     timeoutMs,
   );
 }
@@ -483,7 +488,7 @@ async function splitGitHubSearchRange(
   token: string,
   createdStart: string,
   createdEnd: string,
-  budget: GitHubSearchBudget,
+  schedule: GitHubSearchSchedule,
   timeoutMs: number,
 ): Promise<GitHubRepository[]> {
   const firstDay = Date.parse(`${createdStart}T00:00:00Z`);
@@ -502,8 +507,8 @@ async function splitGitHubSearchRange(
       : isoDate(new Date(firstDay + (Math.floor(spanDays / 2) + 1) * DAY_MS));
   const midpoint = isoDate(new Date(Date.parse(`${nextDay}T00:00:00Z`) - DAY_MS));
   const [older, newer] = await Promise.allSettled([
-    fetchGitHubSearchRange(fetchFn, token, createdStart, midpoint, budget, timeoutMs),
-    fetchGitHubSearchRange(fetchFn, token, nextDay, createdEnd, budget, timeoutMs),
+    fetchGitHubSearchRange(fetchFn, token, createdStart, midpoint, schedule, timeoutMs),
+    fetchGitHubSearchRange(fetchFn, token, nextDay, createdEnd, schedule, timeoutMs),
   ]);
   if (older.status === "rejected") throw older.reason;
   if (newer.status === "rejected") throw newer.reason;
@@ -515,13 +520,13 @@ async function fetchGitHubSearchPages(
   token: string,
   query: string,
   firstPage: GitHubSearchPage,
-  budget: GitHubSearchBudget,
+  schedule: GitHubSearchSchedule,
   timeoutMs: number,
 ): Promise<GitHubRepository[]> {
   const repositories = [...firstPage.repositories];
   const pageCount = Math.ceil(firstPage.totalCount / PER_PAGE);
   for (let page = 2; page <= pageCount; page += 1) {
-    const nextPage = await fetchGitHubSearchPage(fetchFn, token, query, page, budget, timeoutMs);
+    const nextPage = await fetchGitHubSearchPage(fetchFn, token, query, page, schedule, timeoutMs);
     if (nextPage.totalCount !== firstPage.totalCount) {
       throw new Error("GitHub search result count changed while paging");
     }
@@ -540,13 +545,9 @@ async function fetchGitHubSearchPage(
   token: string,
   query: string,
   page: number,
-  budget: GitHubSearchBudget,
+  schedule: GitHubSearchSchedule,
   timeoutMs: number,
 ): Promise<GitHubSearchPage> {
-  budget.requests += 1;
-  if (budget.requests > GITHUB_SEARCH_REQUEST_LIMIT) {
-    throw new Error(`GitHub search required more than ${GITHUB_SEARCH_REQUEST_LIMIT} requests`);
-  }
   const url = new URL(GITHUB_SEARCH_URL);
   url.searchParams.set("q", query);
   url.searchParams.set("per_page", String(PER_PAGE));
@@ -554,7 +555,13 @@ async function fetchGitHubSearchPage(
   url.searchParams.set("sort", "stars");
   url.searchParams.set("order", "desc");
 
-  const response = await fetchWithTimeout(fetchFn, url, githubRequestInit(token), timeoutMs);
+  const response = await fetchScheduledGitHubSearch(
+    fetchFn,
+    url,
+    githubRequestInit(token),
+    schedule,
+    timeoutMs,
+  );
   if (!response.ok) {
     throw new Error(`GitHub search failed with status ${response.status}`);
   }
@@ -575,6 +582,46 @@ async function fetchGitHubSearchPage(
     totalCount: Number(body.total_count),
     repositories: body.items,
   };
+}
+
+async function fetchScheduledGitHubSearch(
+  fetchFn: FetchLike,
+  url: URL,
+  init: RequestInit,
+  schedule: GitHubSearchSchedule,
+  timeoutMs: number,
+): Promise<Response> {
+  let release = () => {};
+  const preceding = schedule.tail;
+  schedule.tail = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await preceding;
+  try {
+    const waitMs = schedule.blockedUntilMs - Date.now();
+    if (waitMs > GITHUB_SEARCH_MAX_RATE_LIMIT_WAIT_MS) {
+      throw new Error("GitHub search rate-limit reset is unexpectedly far away");
+    }
+    if (waitMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+    const response = await fetchWithTimeout(fetchFn, url, init, timeoutMs);
+    const remainingHeader = response.headers.get("X-RateLimit-Remaining");
+    const resetHeader = response.headers.get("X-RateLimit-Reset");
+    if (remainingHeader !== null && resetHeader !== null) {
+      const remaining = Number(remainingHeader);
+      const resetSeconds = Number(resetHeader);
+      if (remaining === 0 && Number.isFinite(resetSeconds)) {
+        schedule.blockedUntilMs = Math.max(
+          schedule.blockedUntilMs,
+          resetSeconds * 1000 + GITHUB_SEARCH_RATE_LIMIT_GRACE_MS,
+        );
+      }
+    }
+    return response;
+  } finally {
+    release();
+  }
 }
 
 async function resolveRepositoryHeads(

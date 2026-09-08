@@ -121,6 +121,7 @@ function repositoryFetch(options: {
   incompleteResults?: boolean;
   searchStatus?: number;
   searchEffect?: (query: string) => number | undefined | Promise<number | undefined>;
+  searchHeaders?: (page: number) => HeadersInit | undefined;
   treeStatus?: Record<string, number>;
   truncatedTrees?: Set<string>;
   onRequest?: (kind: "search" | "head" | "tree" | "manifest", detail: string) => void;
@@ -157,14 +158,17 @@ function repositoryFetch(options: {
       if (start >= 1000) {
         return new Response("Only the first 1000 search results are available", { status: 422 });
       }
-      return Response.json({
-        total_count:
-          createdStart || createdEnd
-            ? repositories.length
-            : options.totalCount ?? repositories.length,
-        incomplete_results: options.incompleteResults ?? false,
-        items: repositories.slice(start, Math.min(start + perPage, 1000)),
-      });
+      return Response.json(
+        {
+          total_count:
+            createdStart || createdEnd
+              ? repositories.length
+              : options.totalCount ?? repositories.length,
+          incomplete_results: options.incompleteResults ?? false,
+          items: repositories.slice(start, Math.min(start + perPage, 1000)),
+        },
+        { headers: options.searchHeaders?.(page) },
+      );
     }
 
     const treeMatch = url.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/git\/trees\/([^/]+)$/);
@@ -420,6 +424,80 @@ describe("refreshPlugins", () => {
     expect(requests.some((request) => request.includes("created%3A"))).toBe(true);
   });
 
+  test("collects complete inventories that span more than 30 serialized search requests", async () => {
+    let searchRequests = 0;
+    let activeSearchRequests = 0;
+    let maxActiveSearchRequests = 0;
+    const repositories = pluginRepositories(3000, (index) => ({
+      created_at: `${2022 + Math.floor(index / 1000)}-01-01T00:00:00Z`,
+    }));
+    const blacklist = new MemoryKV(
+      repositories.map((repository) => `repo:${repository.full_name}`),
+    );
+
+    const result = await refreshPlugins(env(new MemoryR2(), blacklist), {
+      fetch: repositoryFetch({
+        repositories,
+        onRequest(kind) {
+          if (kind === "search") searchRequests += 1;
+        },
+        async searchEffect() {
+          activeSearchRequests += 1;
+          maxActiveSearchRequests = Math.max(maxActiveSearchRequests, activeSearchRequests);
+          await new Promise((resolve) => setTimeout(resolve, 1));
+          activeSearchRequests -= 1;
+          return undefined;
+        },
+      }),
+      logger: { error() {} },
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.snapshot.source.collectedCount).toBe(3000);
+    expect(searchRequests).toBeGreaterThan(30);
+    expect(maxActiveSearchRequests).toBe(1);
+  });
+
+  test("rejects an excessive GitHub rate-limit wait without changing primary objects", async () => {
+    const bucket = new MemoryR2();
+    const previous = {
+      "plugins/index.json": '{"snapshot":"previous"}',
+      "plugins/scan-cache.json": '{"cache":"previous"}',
+      "plugins/star-history.json": '{"history":"previous"}',
+    };
+    for (const [key, value] of Object.entries(previous)) await bucket.put(key, value);
+    const repositories = pluginRepositories(101, () => ({}));
+    const blacklist = new MemoryKV(
+      repositories.map((repository) => `repo:${repository.full_name}`),
+    );
+    let searchRequests = 0;
+
+    const result = await refreshPlugins(env(bucket, blacklist), {
+      fetch: repositoryFetch({
+        repositories,
+        onRequest(kind) {
+          if (kind === "search") searchRequests += 1;
+        },
+        searchHeaders(page) {
+          return page === 1
+            ? {
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": String(Math.ceil(Date.now() / 1000) + 120),
+              }
+            : undefined;
+        },
+      }),
+      logger: { error() {} },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(searchRequests).toBe(1);
+    for (const [key, value] of Object.entries(previous)) {
+      expect(bucket.objects.get(key)?.value).toBe(value);
+    }
+  });
+
   test("preserves all primary objects when a partitioned search fails", async () => {
     const bucket = new MemoryR2();
     const previous = {
@@ -441,12 +519,12 @@ describe("refreshPlugins", () => {
           if (!query.includes("created:")) return undefined;
           qualifiedRequest += 1;
           if (qualifiedRequest === 1) return undefined;
-          if (qualifiedRequest === 2) {
+          if (qualifiedRequest === 2) return 429;
+          if (qualifiedRequest === 3) {
             await new Promise((resolve) => setTimeout(resolve, 50));
             delayedSiblingFinished = true;
-            return undefined;
           }
-          return 429;
+          return undefined;
         },
       }),
       logger: { error() {} },
