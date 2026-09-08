@@ -244,6 +244,142 @@ async fn metadata_only_shell_is_isolated_until_surface_activation() {
 }
 
 #[tokio::test]
+async fn background_surface_activation_preserves_focused_viewer_geometry() {
+    let mut server = test_headless_server();
+    let pane_id = install_shared_view_test_runtime(&mut server);
+    let (focused_control, _) = connect_test_shell(&mut server, 7, 68, 17);
+    let _ = focused_control.recv().expect("focused client snapshot");
+    assert!(server.handle_server_event(ServerEvent::ClientShellFocus {
+        client_id: 7,
+        focused: true,
+    }));
+    let focused_size = server.app.state.workspaces[0].test_runtimes[&pane_id].current_size();
+    assert_eq!(focused_size, (17, 67));
+    let shared_tab_id = server.shell_tab_id_for_client(7).expect("focused tab");
+    assert_eq!(
+        server.tab_geometry_controllers.get(&shared_tab_id),
+        Some(&7)
+    );
+
+    let (writer, background_control, _) = test_client_writer();
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellConnected {
+            client_id: 8,
+            surface_cols: 100,
+            surface_rows: 35,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            pixel_mouse: false,
+            direct_graphics: false,
+            endpoint_keybindings: false,
+            mouse_capture: false,
+            surface_active: false,
+            writer,
+        })
+    );
+    let _ = background_control
+        .recv()
+        .expect("background client snapshot");
+
+    let boot_id = server.client_shell_boot_id.clone();
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+            client_id: 8,
+            boot_id,
+            request: Box::new(api::schema::Request {
+                id: "activate-background-surface".into(),
+                method: api::schema::Method::ClientShellSurfaceSet(
+                    api::schema::ClientShellSurfaceSetParams { active: true },
+                ),
+            }),
+        })
+    );
+    let _ = background_control
+        .recv()
+        .expect("background surface activation response");
+    assert_eq!(
+        server.shell_tab_id_for_client(8).as_deref(),
+        Some(shared_tab_id.as_str())
+    );
+    assert_eq!(server.clients[&7].outer_terminal_focus, Some(true));
+    assert_eq!(server.clients[&8].outer_terminal_focus, None);
+    assert_eq!(
+        server.app.state.workspaces[0].test_runtimes[&pane_id].current_size(),
+        focused_size,
+        "surface activation must not transiently resize a focused viewer's tab"
+    );
+    assert_eq!(
+        server.tab_geometry_controllers.get(&shared_tab_id),
+        Some(&7)
+    );
+
+    assert!(server.handle_server_event(ServerEvent::ClientShellFocus {
+        client_id: 8,
+        focused: false,
+    }));
+    assert_eq!(server.clients[&7].outer_terminal_focus, Some(true));
+    assert_eq!(server.clients[&8].outer_terminal_focus, Some(false));
+    assert_eq!(
+        server.app.state.workspaces[0].test_runtimes[&pane_id].current_size(),
+        focused_size
+    );
+    assert_eq!(
+        server.tab_geometry_controllers.get(&shared_tab_id),
+        Some(&7)
+    );
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn focused_surface_reassertion_reclaims_tab_geometry() {
+    let mut server = test_headless_server();
+    let pane_id = install_shared_view_test_runtime(&mut server);
+    let (focused_control, _) = connect_test_shell(&mut server, 8, 100, 35);
+    let _ = focused_control.recv().expect("focused client snapshot");
+    assert!(server.handle_server_event(ServerEvent::ClientShellFocus {
+        client_id: 8,
+        focused: true,
+    }));
+    let shared_tab_id = server.shell_tab_id_for_client(8).expect("focused tab");
+
+    let (other_control, _) = connect_test_shell(&mut server, 7, 68, 17);
+    let _ = other_control.recv().expect("other client snapshot");
+    assert!(server.claim_shell_tab_geometry(7, false));
+    assert_eq!(
+        server.app.state.workspaces[0].test_runtimes[&pane_id].current_size(),
+        (17, 67)
+    );
+
+    let boot_id = server.client_shell_boot_id.clone();
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+            client_id: 8,
+            boot_id,
+            request: Box::new(api::schema::Request {
+                id: "reassert-focused-surface".into(),
+                method: api::schema::Method::ClientShellSurfaceSet(
+                    api::schema::ClientShellSurfaceSetParams { active: true },
+                ),
+            }),
+        })
+    );
+    let _ = focused_control
+        .recv()
+        .expect("focused surface reassertion response");
+
+    assert_eq!(server.clients[&8].outer_terminal_focus, Some(true));
+    assert_eq!(
+        server.app.state.workspaces[0].test_runtimes[&pane_id].current_size(),
+        (35, 99)
+    );
+    assert_eq!(
+        server.tab_geometry_controllers.get(&shared_tab_id),
+        Some(&8)
+    );
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
 async fn presentation_sync_epoch_replays_modes_and_title() {
     let mut server = test_headless_server();
     let (writer, control_rx, _render_rx) = test_client_writer();

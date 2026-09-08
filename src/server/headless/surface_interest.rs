@@ -69,7 +69,13 @@ impl HeadlessServer {
             // explicitly requests the bounded replay after its coherent frame is visible.
             self.sent_window_title = None;
             self.resize_shared_runtime_to_effective_size_with_pending_agent_resumes(true);
-            self.claim_shell_tab_geometry(client_id, true);
+            let focused_viewer_already_owns_tab = changed
+                && self
+                    .shell_tab_id_for_client(client_id)
+                    .is_some_and(|tab_id| focused_tabs_before.contains(&tab_id));
+            if !focused_viewer_already_owns_tab {
+                self.claim_shell_tab_geometry(client_id, true);
+            }
         } else {
             self.tab_geometry_controllers
                 .retain(|_, controller_id| *controller_id != client_id);
