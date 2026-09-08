@@ -519,6 +519,31 @@ fn expanded_machine_sidebar_applies_space_row_gap_within_each_machine() {
         remote_workspaces[2].rect.y,
         remote_workspaces[1].rect.bottom() + 1
     );
+
+    state.workspace_scroll = usize::MAX;
+    state.compose(100, 18).expect("scrolled endpoint frame");
+    let metrics = state
+        .hits
+        .workspace_scroll_metrics
+        .expect("workspace scroll metrics");
+    assert!(metrics.max_offset_from_bottom > 0);
+    assert_eq!(metrics.offset_from_bottom, 0);
+    assert_eq!(state.workspace_scroll, metrics.max_offset_from_bottom);
+    let visible_remote = state
+        .hits
+        .workspaces
+        .iter()
+        .filter(|hit| hit.endpoint_id == remote_id)
+        .collect::<Vec<_>>();
+    assert_eq!(visible_remote.len(), 3);
+    let gap_y = visible_remote[1].rect.bottom();
+    assert_eq!(visible_remote[2].rect.y, gap_y + 1);
+    assert!(visible_remote[2].rect.bottom() <= state.hits.workspace_body.bottom());
+    assert!(state
+        .hits
+        .workspaces
+        .iter()
+        .all(|hit| gap_y < hit.rect.top() || gap_y >= hit.rect.bottom()));
 }
 
 #[test]
