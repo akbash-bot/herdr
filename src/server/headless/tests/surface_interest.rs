@@ -36,6 +36,22 @@ fn lifecycle_resize() -> crate::protocol::ClientMessage {
     }
 }
 
+fn request_active_surface(server: &mut HeadlessServer, client_id: u64, request_id: &str) {
+    let boot_id = server.client_shell_boot_id.clone();
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+            client_id,
+            boot_id,
+            request: Box::new(api::schema::Request {
+                id: request_id.into(),
+                method: api::schema::Method::ClientShellSurfaceSet(
+                    api::schema::ClientShellSurfaceSetParams { active: true },
+                ),
+            }),
+        })
+    );
+}
+
 #[tokio::test]
 async fn metadata_only_shell_is_isolated_until_surface_activation() {
     let mut server = test_headless_server();
@@ -281,19 +297,7 @@ async fn background_surface_activation_preserves_focused_viewer_geometry() {
         .recv()
         .expect("background client snapshot");
 
-    let boot_id = server.client_shell_boot_id.clone();
-    assert!(
-        server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
-            client_id: 8,
-            boot_id,
-            request: Box::new(api::schema::Request {
-                id: "activate-background-surface".into(),
-                method: api::schema::Method::ClientShellSurfaceSet(
-                    api::schema::ClientShellSurfaceSetParams { active: true },
-                ),
-            }),
-        })
-    );
+    request_active_surface(&mut server, 8, "activate-background-surface");
     let _ = background_control
         .recv()
         .expect("background surface activation response");
@@ -327,6 +331,19 @@ async fn background_surface_activation_preserves_focused_viewer_geometry() {
         server.tab_geometry_controllers.get(&shared_tab_id),
         Some(&7)
     );
+
+    request_active_surface(&mut server, 8, "synchronize-background-surface");
+    let _ = background_control
+        .recv()
+        .expect("background presentation synchronization response");
+    assert_eq!(
+        server.app.state.workspaces[0].test_runtimes[&pane_id].current_size(),
+        focused_size
+    );
+    assert_eq!(
+        server.tab_geometry_controllers.get(&shared_tab_id),
+        Some(&7)
+    );
     shutdown_test_runtimes(&mut server);
 }
 
@@ -350,19 +367,7 @@ async fn focused_surface_reassertion_reclaims_tab_geometry() {
         (17, 67)
     );
 
-    let boot_id = server.client_shell_boot_id.clone();
-    assert!(
-        server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
-            client_id: 8,
-            boot_id,
-            request: Box::new(api::schema::Request {
-                id: "reassert-focused-surface".into(),
-                method: api::schema::Method::ClientShellSurfaceSet(
-                    api::schema::ClientShellSurfaceSetParams { active: true },
-                ),
-            }),
-        })
-    );
+    request_active_surface(&mut server, 8, "reassert-focused-surface");
     let _ = focused_control
         .recv()
         .expect("focused surface reassertion response");
