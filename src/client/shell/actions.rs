@@ -350,7 +350,7 @@ impl ClientShellState {
         self.push_endpoint_method_with_kind(method, PendingEndpointKind::Generic, outcome);
     }
 
-    fn push_endpoint_notice(
+    pub(super) fn push_endpoint_notice(
         &mut self,
         kind: ClientEndpointNoticeKind,
         code: impl Into<String>,

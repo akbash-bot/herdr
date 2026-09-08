@@ -62,6 +62,8 @@ impl ClientShellState {
 
     pub(super) fn move_navigate_workspace(&mut self, delta: isize) {
         let mobile = self.mobile_layout_active();
+        let surface_available = self.snapshot.is_some() && self.pane_surface.is_some();
+        let empty_collapsed_groups = HashSet::new();
         let mut targets = Vec::new();
         for endpoint in &self.endpoints {
             if endpoint.status != ClientEndpointStatus::Online {
@@ -70,13 +72,7 @@ impl ClientShellState {
             let Some(snapshot) = endpoint.snapshot.as_deref() else {
                 continue;
             };
-            let entries = if self.endpoints.len() == 1 {
-                self.navigation_workspace_entries(snapshot)
-            } else if self.sidebar_collapsed
-                && !mobile
-                && self.snapshot.is_some()
-                && self.pane_surface.is_some()
-            {
+            let entries = if self.sidebar_collapsed && !mobile && surface_available {
                 snapshot
                     .workspaces
                     .iter()
@@ -88,7 +84,13 @@ impl ClientShellState {
                     })
                     .collect()
             } else {
-                render::workspace_entries(snapshot, &HashSet::new())
+                let collapsed_groups = if mobile && surface_available {
+                    &empty_collapsed_groups
+                } else {
+                    self.collapsed_groups_for_endpoint(&endpoint.endpoint_id)
+                        .unwrap_or(&empty_collapsed_groups)
+                };
+                render::workspace_entries(snapshot, collapsed_groups)
             };
             for entry in entries {
                 targets.push(WorkspaceNavigationTarget {
@@ -127,6 +129,8 @@ impl ClientShellState {
 
     pub(super) fn accept_navigate_workspace(&mut self, outcome: &mut ClientShellInput) {
         let Some(target) = self.navigate_workspace_id.clone() else {
+            self.mode = self.copy_or_terminal_mode();
+            outcome.repaint = true;
             return;
         };
         if !self.navigation_target_valid(&target) {

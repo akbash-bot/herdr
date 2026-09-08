@@ -128,7 +128,9 @@ impl ClientShellState {
     }
 
     fn prepare_committed_text(&mut self, text: &str, outcome: &mut ClientShellInput) -> bool {
-        if self.insert_copy_search_text(text) {
+        if !(self.mode == ClientShellMode::Navigate && self.workspace_preview_action_blocked())
+            && self.insert_copy_search_text(text)
+        {
             outcome.repaint = true;
             return true;
         }
@@ -425,7 +427,12 @@ impl ClientShellState {
     }
 
     pub(super) fn modal_paste_target_active(&self) -> bool {
-        if self.popup_pending || self.popup_input_target().is_some() {
+        if self.popup_pending
+            || self.popup_input_target().is_some()
+            || (self.overlay.is_none()
+                && self.mode == ClientShellMode::Navigate
+                && self.workspace_preview_action_blocked())
+        {
             return false;
         }
         if self
@@ -655,6 +662,22 @@ impl ClientShellState {
             return;
         }
 
+        let (code, modifiers) = crate::config::normalize_key_combo((key.code, key.modifiers));
+        if code == KeyCode::Enter && modifiers.is_empty() {
+            self.accept_navigate_workspace(outcome);
+            return;
+        }
+        if self.workspace_preview_action_blocked() {
+            self.push_endpoint_notice(
+                ClientEndpointNoticeKind::Rejected,
+                "navigate_endpoint_inactive",
+                "Confirm workspace first",
+                "Select an available workspace and press Enter before using workspace or pane actions",
+            );
+            outcome.repaint = true;
+            return;
+        }
+
         if let Some(index) = ('1'..='9').position(|digit| {
             crate::config::terminal_key_matches_combo(
                 key,
@@ -678,13 +701,8 @@ impl ClientShellState {
             return;
         }
 
-        let (code, modifiers) = crate::config::normalize_key_combo((key.code, key.modifiers));
         if modifiers.is_empty() {
             match code {
-                KeyCode::Enter => {
-                    self.accept_navigate_workspace(outcome);
-                    return;
-                }
                 KeyCode::Tab => {
                     self.record_navigate_binding(
                         KeybindMatch::Action(KeybindAction::CyclePaneNext),
@@ -793,18 +811,6 @@ impl ClientShellState {
         if !self.indexed_navigation_target_exists(&binding) {
             return;
         }
-        if self.workspace_preview_action_blocked()
-            && matches!(
-                binding,
-                KeybindMatch::Action(
-                    KeybindAction::RenameWorkspace | KeybindAction::CloseWorkspace
-                )
-            )
-        {
-            self.record_binding(binding, outcome);
-            return;
-        }
-
         if let KeybindMatch::Action(KeybindAction::CyclePaneNext) = binding {
             self.cycle_pane(false, outcome);
         } else if let KeybindMatch::Action(KeybindAction::CyclePanePrevious) = binding {
