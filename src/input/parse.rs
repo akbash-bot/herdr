@@ -79,7 +79,10 @@ fn parse_kitty_associated_text(value: &str) -> Option<String> {
 fn matching_control_associated_text(value: &str, code: KeyCode) -> bool {
     matches!(
         (code, value),
-        (KeyCode::Enter, "13") | (KeyCode::Backspace, "8")
+        (KeyCode::Enter, "13")
+            | (KeyCode::Backspace, "8")
+            | (KeyCode::Tab, "9")
+            | (KeyCode::Esc, "27")
     )
 }
 
@@ -747,6 +750,16 @@ mod tests {
                 KeyCode::Backspace,
                 crossterm::event::KeyEventKind::Release,
             ),
+            (
+                "\x1b[27;1;27u",
+                KeyCode::Esc,
+                crossterm::event::KeyEventKind::Press,
+            ),
+            (
+                "\x1b[9;1;9u",
+                KeyCode::Tab,
+                crossterm::event::KeyEventKind::Press,
+            ),
         ] {
             let key = parse_terminal_key_sequence(sequence).expect("captured key should parse");
             assert_eq!(key.code, expected_code);
@@ -765,6 +778,10 @@ mod tests {
         assert_eq!(parse_terminal_key_sequence("\x1b[13;1;8u"), None);
         assert_eq!(parse_terminal_key_sequence("\x1b[127::8;1;13u"), None);
         assert_eq!(parse_terminal_key_sequence("\x1b[13;1;13:10u"), None);
+        assert_eq!(parse_terminal_key_sequence("\x1b[9;1;27u"), None);
+        assert_eq!(parse_terminal_key_sequence("\x1b[27;1;9u"), None);
+        assert_eq!(parse_terminal_key_sequence("\x1b[9;1;9:97u"), None);
+        assert_eq!(parse_terminal_key_sequence("\x1b[27;1;27:27u"), None);
     }
 
     #[test]
