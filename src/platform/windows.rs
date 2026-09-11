@@ -208,13 +208,14 @@ pub(crate) fn write_config_temporary(
     use std::io::Write;
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::{
+        Foundation::GENERIC_WRITE,
         Security::{
             GetFileSecurityW, GetSecurityDescriptorControl, SetKernelObjectSecurity,
             DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, LABEL_SECURITY_INFORMATION,
             OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, SE_DACL_PROTECTED,
             UNPROTECTED_DACL_SECURITY_INFORMATION,
         },
-        Storage::FileSystem::{FILE_GENERIC_WRITE, WRITE_DAC, WRITE_OWNER},
+        Storage::FileSystem::{WRITE_DAC, WRITE_OWNER},
     };
     if let Some(source) = source {
         // CopyFile preserves file attributes, encryption and alternate streams.
@@ -224,7 +225,9 @@ pub(crate) fn write_config_temporary(
     let mut options = std::fs::OpenOptions::new();
     options.write(true).truncate(true);
     if source.is_some() {
-        options.access_mode(FILE_GENERIC_WRITE | WRITE_DAC | WRITE_OWNER);
+        // TRUNCATE_EXISTING requires the GENERIC_WRITE bit, not its mapped
+        // FILE_GENERIC_WRITE rights, even though those grant equivalent access.
+        options.access_mode(GENERIC_WRITE | WRITE_DAC | WRITE_OWNER);
     }
     let mut output = options.open(temporary)?;
     output.write_all(contents)?;

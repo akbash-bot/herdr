@@ -126,10 +126,10 @@ pub(crate) fn write_config_temporary(
         let input = std::fs::File::open(source)?;
         let metadata = input.metadata()?;
         let current = output.metadata()?;
-        if (metadata.uid(), metadata.gid()) != (current.uid(), current.gid()) {
-            if unsafe { libc::fchown(output.as_raw_fd(), metadata.uid(), metadata.gid()) } != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
+        if (metadata.uid(), metadata.gid()) != (current.uid(), current.gid())
+            && unsafe { libc::fchown(output.as_raw_fd(), metadata.uid(), metadata.gid()) } != 0
+        {
+            return Err(std::io::Error::last_os_error());
         }
         // Prepare access controls while the temporary is still empty. Copy ACLs
         // before mode bits so no inherited/default grant can expose the content.

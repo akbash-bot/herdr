@@ -51,7 +51,7 @@ herdr integration uninstall antigravity-cli
 herdr integration uninstall grok
 ```
 
-Shared agent configuration is written to a temporary file and replaced only after the complete write succeeds. Herdr preserves file permissions and follows symlinks. Config files with multiple hard links are rejected before installation or removal changes hook files; use a separate file or a symlink before retrying. This protects each config file, not an entire multi-file installation from partial completion.
+Shared agent configuration is written to a temporary file and replaced only after the complete write succeeds. Herdr preserves file permissions and follows symlinks. Before changing hook files, Herdr checks for config files with multiple hard links and rejects the operation if it finds any; use a separate file or a symlink before retrying. A later failure, including a concurrent config change, can still leave earlier installation changes in place. This is per-file protection against incomplete writes, not an installation transaction or a power-loss durability guarantee.
 
 ## How Herdr uses integrations
 
