@@ -210,18 +210,15 @@ pub(crate) fn write_config_temporary(
     use windows_sys::Win32::{
         Foundation::GENERIC_WRITE,
         Security::{
-            GetFileSecurityW, GetSecurityDescriptorControl, SetKernelObjectSecurity,
-            DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, LABEL_SECURITY_INFORMATION,
-            OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, SE_DACL_PROTECTED,
+            Authorization::{SetSecurityInfo, SE_FILE_OBJECT},
+            GetSecurityDescriptorControl, GetSecurityDescriptorDacl, GetSecurityDescriptorGroup,
+            GetSecurityDescriptorOwner, GetSecurityDescriptorSacl, DACL_SECURITY_INFORMATION,
+            GROUP_SECURITY_INFORMATION, LABEL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+            PROTECTED_DACL_SECURITY_INFORMATION, SE_DACL_PROTECTED,
             UNPROTECTED_DACL_SECURITY_INFORMATION,
         },
         Storage::FileSystem::{WRITE_DAC, WRITE_OWNER},
     };
-    if let Some(source) = source {
-        // CopyFile preserves file attributes, encryption and alternate streams.
-        // It does not preserve the DACL; that is copied explicitly below.
-        std::fs::copy(source, temporary)?;
-    }
     let mut options = std::fs::OpenOptions::new();
     options.write(true).truncate(true);
     if source.is_some() {
@@ -230,33 +227,13 @@ pub(crate) fn write_config_temporary(
         options.access_mode(GENERIC_WRITE | WRITE_DAC | WRITE_OWNER);
     }
     let mut output = options.open(temporary)?;
-    output.write_all(contents)?;
     if let Some(source) = source {
-        let source = extended_length_path(source)?;
         let information = OWNER_SECURITY_INFORMATION
             | GROUP_SECURITY_INFORMATION
             | DACL_SECURITY_INFORMATION
             | LABEL_SECURITY_INFORMATION;
-        let mut needed = 0;
-        unsafe {
-            GetFileSecurityW(source.as_ptr(), information, null_mut(), 0, &mut needed);
-        }
-        if needed == 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        let mut descriptor = vec![0_u8; needed as usize];
-        if unsafe {
-            GetFileSecurityW(
-                source.as_ptr(),
-                information,
-                descriptor.as_mut_ptr().cast(),
-                needed,
-                &mut needed,
-            )
-        } == 0
-        {
-            return Err(std::io::Error::last_os_error());
-        }
+        let mut descriptor = config_security_descriptor(source, information)?;
+        let expected = config_security_sddl(&mut descriptor, information)?;
         let mut control = 0;
         let mut revision = 0;
         if unsafe {
@@ -274,18 +251,113 @@ pub(crate) fn write_config_temporary(
         } else {
             UNPROTECTED_DACL_SECURITY_INFORMATION
         };
-        if unsafe {
-            SetKernelObjectSecurity(
-                output.as_raw_handle(),
-                information | protection,
-                descriptor.as_mut_ptr().cast(),
-            )
-        } == 0
+        let mut owner = null_mut();
+        let mut group = null_mut();
+        let mut dacl = null_mut();
+        let mut sacl = null_mut();
+        let mut defaulted = 0;
+        let mut present = 0;
+        let descriptor = descriptor.as_mut_ptr().cast();
+        if unsafe { GetSecurityDescriptorOwner(descriptor, &mut owner, &mut defaulted) } == 0
+            || unsafe { GetSecurityDescriptorGroup(descriptor, &mut group, &mut defaulted) } == 0
+            || unsafe {
+                GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted)
+            } == 0
+            || unsafe {
+                GetSecurityDescriptorSacl(descriptor, &mut present, &mut sacl, &mut defaulted)
+            } == 0
         {
             return Err(std::io::Error::last_os_error());
         }
+        // Files require SetSecurityInfo, not SetKernelObjectSecurity: the latter
+        // drops the filesystem ACL's automatic-inheritance metadata.
+        let error = unsafe {
+            SetSecurityInfo(
+                output.as_raw_handle(),
+                SE_FILE_OBJECT,
+                information | protection,
+                owner,
+                group,
+                dacl,
+                sacl,
+            )
+        };
+        if error != 0 {
+            return Err(std::io::Error::from_raw_os_error(error as i32));
+        }
+        let mut installed = config_security_descriptor(temporary, information)?;
+        if config_security_sddl(&mut installed, information)? != expected {
+            // An unprotected file moved from another directory can retain old
+            // inherited permissions. Never put secrets into a temporary whose
+            // new parent added access, even if publication would be rejected.
+            return Err(std::io::Error::other(
+                "cannot preserve config access controls during atomic replacement",
+            ));
+        }
+        // Only copy sensitive contents/streams after access controls match.
+        // CopyFile preserves attributes, encryption and alternate streams.
+        std::fs::copy(source, temporary)?;
+        output.set_len(0)?;
     }
+    output.write_all(contents)?;
     output.sync_all()
+}
+
+fn config_security_descriptor(
+    path: &std::path::Path,
+    information: windows_sys::Win32::Security::OBJECT_SECURITY_INFORMATION,
+) -> std::io::Result<Vec<u8>> {
+    use windows_sys::Win32::Security::GetFileSecurityW;
+    let path = extended_length_path(path)?;
+    let mut needed = 0;
+    unsafe { GetFileSecurityW(path.as_ptr(), information, null_mut(), 0, &mut needed) };
+    if needed == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut descriptor = vec![0_u8; needed as usize];
+    if unsafe {
+        GetFileSecurityW(
+            path.as_ptr(),
+            information,
+            descriptor.as_mut_ptr().cast(),
+            needed,
+            &mut needed,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(descriptor)
+}
+
+fn config_security_sddl(
+    descriptor: &mut [u8],
+    information: windows_sys::Win32::Security::OBJECT_SECURITY_INFORMATION,
+) -> std::io::Result<Vec<u16>> {
+    use windows_sys::Win32::Security::{
+        Authorization::{ConvertSecurityDescriptorToStringSecurityDescriptorW, SDDL_REVISION_1},
+        SACL_SECURITY_INFORMATION,
+    };
+    let mut text = null_mut();
+    if unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor.as_mut_ptr().cast(),
+            SDDL_REVISION_1,
+            // Only labels were queried from the SACL. Serialize that returned
+            // SACL too; this does not request audit access to either file.
+            information | SACL_SECURITY_INFORMATION,
+            &mut text,
+            null_mut(),
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    let result = unsafe { widestring::U16CStr::from_ptr_str(text) }
+        .as_slice()
+        .to_vec();
+    unsafe { LocalFree(text.cast()) };
+    Ok(result)
 }
 
 pub(crate) fn set_default_plugin_pane_pwd(
