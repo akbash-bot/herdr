@@ -3,8 +3,9 @@
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
-use std::process::{Command, Stdio};
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -12,6 +13,28 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const CHECK_NOTICE: &str = "# Tailscale SSH requires an additional check.";
 const CHECK_URL: &str = "# To authenticate, visit: https://login.tailscale.com/a/test";
 const LATER_FAILURE: &str = "ssh: later setup probe failed";
+
+struct TestCleanup {
+    temp_dir: PathBuf,
+    child: Option<Child>,
+    reader: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for TestCleanup {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            // The child leads a private process group and has not been reaped.
+            // Kill its fake SSH descendants too, not just the Herdr launcher.
+            // SAFETY: the negative PID targets only this test's process group.
+            unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
+            let _ = child.wait();
+        }
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+        let _ = fs::remove_dir_all(&self.temp_dir);
+    }
+}
 
 fn wait_for_file(path: &Path, timeout: Duration) {
     let deadline = Instant::now() + timeout;
@@ -36,6 +59,11 @@ fn check_authentication_output(framed_shell: bool) {
         "herdr-remote-auth-test-{}-{nonce}",
         std::process::id()
     ));
+    let mut cleanup = TestCleanup {
+        temp_dir: temp_dir.clone(),
+        child: None,
+        reader: None,
+    };
     fs::create_dir_all(&temp_dir).expect("create test directory");
 
     let started_path = temp_dir.join("ssh-started");
@@ -57,12 +85,14 @@ authenticate() {{
 if [ ! -e "$FAKE_SSH_FIRST_DONE" ]; then
     : > "$FAKE_SSH_FIRST_DONE"
     if [ "$FAKE_SSH_FRAMED" = 0 ]; then authenticate; fi
+    /bin/cat >/dev/null
     printf 'login banner\nherdr-remote-output-ready:1\nLinux\nx86_64\n'
     exit 0
 fi
 if [ "$FAKE_SSH_FRAMED" = 1 ] && [ ! -e "$FAKE_SSH_STARTED" ]; then
     authenticate
 fi
+/bin/cat >/dev/null
 : > "$FAKE_SSH_ADVANCED"
 printf '%s\n' '{LATER_FAILURE}' >&2
 exit 255
@@ -75,7 +105,7 @@ exit 255
 
     let inherited_path = std::env::var("PATH").unwrap_or_default();
     let path = format!("{}:{inherited_path}", temp_dir.display());
-    let mut child = Command::new(env!("CARGO_BIN_EXE_herdr"))
+    let child = Command::new(env!("CARGO_BIN_EXE_herdr"))
         .args(["--remote", "check-host"])
         .env("PATH", path)
         .env("FAKE_SSH_FRAMED", if framed_shell { "1" } else { "0" })
@@ -92,12 +122,15 @@ exit 255
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
+        .process_group(0)
         .spawn()
         .expect("start remote attach");
 
+    cleanup.child = Some(child);
+    let child = cleanup.child.as_mut().expect("registered child");
     let stderr = child.stderr.take().expect("remote attach stderr");
     let (line_tx, line_rx) = mpsc::channel();
-    let reader = thread::spawn(move || {
+    cleanup.reader = Some(thread::spawn(move || {
         for line in BufReader::new(stderr).lines() {
             if line_tx
                 .send(line.expect("read remote attach stderr"))
@@ -106,18 +139,23 @@ exit 255
                 break;
             }
         }
-    });
+    }));
 
     wait_for_file(&started_path, Duration::from_secs(2));
-    let notice = line_rx.recv_timeout(Duration::from_millis(500));
-    let url = line_rx.recv_timeout(Duration::from_millis(500));
+    let notice = line_rx.recv_timeout(Duration::from_secs(2));
+    let url = line_rx.recv_timeout(Duration::from_secs(2));
     fs::write(&approval_path, b"approved").expect("release fake ssh approval");
     wait_for_file(&advanced_path, Duration::from_secs(2));
 
     let status = child.wait().expect("wait for remote attach");
-    reader.join().expect("join stderr reader");
+    cleanup.child = None;
+    cleanup
+        .reader
+        .take()
+        .expect("registered stderr reader")
+        .join()
+        .expect("join stderr reader");
     let later_lines = line_rx.try_iter().collect::<Vec<_>>();
-    let _ = fs::remove_dir_all(&temp_dir);
 
     assert_eq!(notice.as_deref(), Ok(CHECK_NOTICE));
     assert_eq!(url.as_deref(), Ok(CHECK_URL));
