@@ -53,6 +53,8 @@ herdr integration uninstall antigravity-cli
 herdr integration uninstall grok
 ```
 
+共享的智能体配置会先写入临时文件，完整写入成功后才替换原文件。Herdr 会保留文件权限并跟随符号链接。如果配置文件有多个硬链接，安装或卸载会在修改钩子文件之前拒绝操作；请改用独立文件或符号链接后重试。这项保护针对单个配置文件，不保证跨多个文件的整个安装操作能够回滚。
+
 ## Herdr 如何使用集成
 
 Herdr 以两种不同方式使用集成:

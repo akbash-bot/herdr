@@ -2384,6 +2384,38 @@ fn opencode_v2_install_status_and_uninstall_preserve_cli_preferences() {
 }
 
 #[test]
+fn opencode_hard_link_rejection_precedes_install_and_uninstall_asset_changes() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let dir = home.join(".config/opencode");
+    fs::create_dir_all(dir.join("plugins")).unwrap();
+    std::env::set_var("HOME", &home);
+    let plugin = dir.join("plugins").join(OPENCODE_PLUGIN_INSTALL_NAME);
+    fs::write(&plugin, "previous integration").unwrap();
+    let config = dir.join("cli.json");
+    let original = r#"{"plugins":["./herdr-opencode"],"theme":"system"}"#;
+    fs::write(&config, original).unwrap();
+    let alias = base.join("linked-config");
+    fs::hard_link(&config, &alias).unwrap();
+    let target = crate::api::schema::IntegrationTarget::Opencode;
+    for error in [
+        install_target(target).unwrap_err(),
+        uninstall_target(target).unwrap_err(),
+    ] {
+        assert!(error.to_string().contains("multiple hard links"));
+        assert!(error.to_string().contains("cli.json"));
+    }
+    assert_eq!(fs::read_to_string(&plugin).unwrap(), "previous integration");
+    assert_eq!(fs::read_to_string(&alias).unwrap(), original);
+    assert_eq!(crate::platform::config_file_link_count(&config).unwrap(), 2);
+    assert!(!dir.join("tui.jsonc").exists());
+    assert!(!dir.join(OPENCODE_V2_TUI_PLUGIN_DIR).exists());
+    std::env::remove_var("HOME");
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
 fn opencode_invalid_cli_config_does_not_overwrite_existing_plugins() {
     let _lock = integration_env_lock();
     let base = unique_base();

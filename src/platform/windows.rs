@@ -14,6 +14,8 @@ use std::{
 };
 
 mod clipboard_image;
+#[cfg(test)]
+mod config_file_tests;
 
 pub(crate) fn classify_child_exit(status: &portable_pty::ExitStatus) -> super::ChildExitReason {
     // STATUS_CONTROL_C_EXIT is reported without a Unix signal by portable-pty.
@@ -135,6 +137,152 @@ pub(crate) fn replace_file(
     } else {
         Ok(())
     }
+}
+
+pub(crate) fn config_file_link_count(path: &std::path::Path) -> std::io::Result<u64> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+    let file = std::fs::File::open(path)?;
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(u64::from(info.nNumberOfLinks))
+}
+
+pub(crate) fn create_config_temporary(
+    path: &std::path::Path,
+    private: bool,
+) -> std::io::Result<std::fs::File> {
+    if !private {
+        return std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path);
+    }
+    use interprocess::os::windows::security_descriptor::{
+        AsSecurityDescriptorExt as _, SecurityDescriptor,
+    };
+    use widestring::U16CString;
+    use windows_sys::Win32::{
+        Foundation::GENERIC_WRITE,
+        Storage::FileSystem::{
+            CreateFileW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
+        },
+    };
+    let sddl =
+        U16CString::from_str("D:P(A;;GA;;;SY)(A;;GA;;;OW)").map_err(std::io::Error::other)?;
+    let descriptor = SecurityDescriptor::deserialize(&sddl)?;
+    let mut attributes = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: null_mut(),
+        bInheritHandle: 0,
+    };
+    descriptor.write_to_security_attributes(&mut attributes);
+    let path = extended_length_path(path)?;
+    let handle = unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            &attributes,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL,
+            null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error());
+    }
+    // CreateFileW returned an owned handle; File closes it exactly once.
+    Ok(unsafe { std::fs::File::from_raw_handle(handle) })
+}
+
+pub(crate) fn write_config_temporary(
+    source: Option<&std::path::Path>,
+    temporary: &std::path::Path,
+    contents: &[u8],
+) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::{
+        Security::{
+            GetFileSecurityW, GetSecurityDescriptorControl, SetKernelObjectSecurity,
+            DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, LABEL_SECURITY_INFORMATION,
+            OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, SE_DACL_PROTECTED,
+            UNPROTECTED_DACL_SECURITY_INFORMATION,
+        },
+        Storage::FileSystem::{FILE_GENERIC_WRITE, WRITE_DAC, WRITE_OWNER},
+    };
+    if let Some(source) = source {
+        // CopyFile preserves file attributes, encryption and alternate streams.
+        // It does not preserve the DACL; that is copied explicitly below.
+        std::fs::copy(source, temporary)?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).truncate(true);
+    if source.is_some() {
+        options.access_mode(FILE_GENERIC_WRITE | WRITE_DAC | WRITE_OWNER);
+    }
+    let mut output = options.open(temporary)?;
+    output.write_all(contents)?;
+    if let Some(source) = source {
+        let source = extended_length_path(source)?;
+        let information = OWNER_SECURITY_INFORMATION
+            | GROUP_SECURITY_INFORMATION
+            | DACL_SECURITY_INFORMATION
+            | LABEL_SECURITY_INFORMATION;
+        let mut needed = 0;
+        unsafe {
+            GetFileSecurityW(source.as_ptr(), information, null_mut(), 0, &mut needed);
+        }
+        if needed == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut descriptor = vec![0_u8; needed as usize];
+        if unsafe {
+            GetFileSecurityW(
+                source.as_ptr(),
+                information,
+                descriptor.as_mut_ptr().cast(),
+                needed,
+                &mut needed,
+            )
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut control = 0;
+        let mut revision = 0;
+        if unsafe {
+            GetSecurityDescriptorControl(
+                descriptor.as_mut_ptr().cast(),
+                &mut control,
+                &mut revision,
+            )
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        let protection = if control & SE_DACL_PROTECTED != 0 {
+            PROTECTED_DACL_SECURITY_INFORMATION
+        } else {
+            UNPROTECTED_DACL_SECURITY_INFORMATION
+        };
+        if unsafe {
+            SetKernelObjectSecurity(
+                output.as_raw_handle(),
+                information | protection,
+                descriptor.as_mut_ptr().cast(),
+            )
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    output.sync_all()
 }
 
 pub(crate) fn set_default_plugin_pane_pwd(
