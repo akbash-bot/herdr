@@ -16,6 +16,8 @@ use std::{
 mod clipboard_image;
 #[cfg(test)]
 mod config_file_tests;
+#[cfg(test)]
+mod native_replace_probe;
 
 pub(crate) fn classify_child_exit(status: &portable_pty::ExitStatus) -> super::ChildExitReason {
     // STATUS_CONTROL_C_EXIT is reported without a Unix signal by portable-pty.

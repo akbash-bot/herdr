@@ -167,6 +167,14 @@ jobs:
           $env:CARGO_INCREMENTAL = "1"
           just check
 
+      # Temporary native feasibility evidence for #3970; does not replace checks.
+      - name: Probe native Windows config replacement
+        if: matrix.kind == 'windows' && !cancelled()
+        shell: pwsh
+        run: |
+          cargo nextest run --locked -E 'test(native_replace_probe)' --no-fail-fast --status-level all --final-status-level all --success-output immediate --failure-output immediate
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Smoke ConPTY pane
         if: matrix.kind == 'windows'
         shell: pwsh
