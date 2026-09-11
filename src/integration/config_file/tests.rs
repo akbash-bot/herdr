@@ -105,18 +105,25 @@ fn symlink_chains_and_dangling_targets_preserve_links() {
     let intermediate = other.join("link");
     let entry = dir.0.join("config");
     symlink(&target, &intermediate);
-    symlink(Path::new("other/link"), &entry);
+    // A Windows reparse target needs native separators, unlike ordinary Win32 paths.
+    let relative_target = Path::new("other").join("link");
+    symlink(&relative_target, &entry);
+    let original_intermediate = fs::read_link(&intermediate).unwrap();
+    assert_eq!(
+        fs::metadata(&entry).unwrap_err().kind(),
+        io::ErrorKind::NotFound
+    );
     write_config(&entry, b"first install").unwrap();
     write_config(&entry, b"second install").unwrap();
     assert_eq!(fs::read(&target).unwrap(), b"second install");
-    assert_eq!(fs::read_link(&entry).unwrap(), Path::new("other/link"));
-    assert_eq!(fs::read_link(&intermediate).unwrap(), target);
+    assert_eq!(fs::read_link(&entry).unwrap(), relative_target);
+    assert_eq!(fs::read_link(&intermediate).unwrap(), original_intermediate);
     assert_eq!(fs::read_dir(&other).unwrap().count(), 2);
     let alias = other.join("hard-link");
     fs::hard_link(&target, &alias).unwrap();
     assert!(write_config(&entry, b"must not change").is_err());
     assert_eq!(fs::read(&alias).unwrap(), b"second install");
-    assert_eq!(fs::read_link(&entry).unwrap(), Path::new("other/link"));
+    assert_eq!(fs::read_link(&entry).unwrap(), relative_target);
 
     let cycle = dir.0.join("cycle");
     symlink(Path::new("cycle"), &cycle);
