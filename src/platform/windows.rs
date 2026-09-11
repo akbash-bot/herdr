@@ -286,7 +286,14 @@ pub(crate) fn write_config_temporary(
             return Err(std::io::Error::from_raw_os_error(error as i32));
         }
         let mut installed = config_security_descriptor(temporary, information)?;
-        if config_security_sddl(&mut installed, information)? != expected {
+        let installed = config_security_sddl(&mut installed, information)?;
+        if installed != expected {
+            #[cfg(test)]
+            eprintln!(
+                "config ACL mismatch: expected {}, installed {}",
+                String::from_utf16_lossy(&expected),
+                String::from_utf16_lossy(&installed),
+            );
             // An unprotected file moved from another directory can retain old
             // inherited permissions. Never put secrets into a temporary whose
             // new parent added access, even if publication would be rejected.
