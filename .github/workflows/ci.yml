@@ -167,6 +167,15 @@ jobs:
           $env:CARGO_INCREMENTAL = "1"
           just check
 
+      # Candidate validation is additional evidence, not a replacement for checks.
+      - name: Validate Windows recovery-backed config writes
+        if: matrix.kind == 'windows' && !cancelled()
+        shell: pwsh
+        run: |
+          $env:CARGO_INCREMENTAL = "1"
+          cargo nextest run --locked -E 'test(config_backup::tests)' --no-fail-fast --status-level pass --final-status-level pass --success-output immediate --failure-output immediate
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Smoke ConPTY pane
         if: matrix.kind == 'windows'
         shell: pwsh

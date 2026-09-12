@@ -14,6 +14,9 @@ use std::{
 };
 
 mod clipboard_image;
+// Validate the recovery-backed candidate natively before routing config writes to it.
+#[cfg(test)]
+mod config_backup;
 #[cfg(test)]
 mod config_file_tests;
 
