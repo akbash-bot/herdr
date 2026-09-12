@@ -70,20 +70,15 @@ fn restore_without_overwrite(backup: &Path, target: &Path) -> std::io::Result<()
     Ok(())
 }
 
-fn seed_non_dacl_metadata(source: &Path, temporary: &Path) {
+fn seed_owner_and_group(source: &Path, temporary: &Path) {
     use windows_sys::Win32::Security::Authorization::{SetNamedSecurityInfoW, SE_FILE_OBJECT};
-    use windows_sys::Win32::Security::{
-        GetSecurityDescriptorGroup, GetSecurityDescriptorOwner, GetSecurityDescriptorSacl,
-    };
-    let information =
-        OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION;
+    use windows_sys::Win32::Security::{GetSecurityDescriptorGroup, GetSecurityDescriptorOwner};
+    let information = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION;
     let mut descriptor = config_security_descriptor(source, information).unwrap();
     let descriptor = descriptor.as_mut_ptr().cast();
     let mut owner = null_mut();
     let mut group = null_mut();
-    let mut sacl = null_mut();
     let mut defaulted = 0;
-    let mut present = 0;
     assert_ne!(
         unsafe { GetSecurityDescriptorOwner(descriptor, &mut owner, &mut defaulted) },
         0
@@ -92,14 +87,6 @@ fn seed_non_dacl_metadata(source: &Path, temporary: &Path) {
         unsafe { GetSecurityDescriptorGroup(descriptor, &mut group, &mut defaulted) },
         0
     );
-    assert_ne!(
-        unsafe { GetSecurityDescriptorSacl(descriptor, &mut present, &mut sacl, &mut defaulted) },
-        0
-    );
-    let mut information = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION;
-    if present != 0 && !sacl.is_null() {
-        information |= LABEL_SECURITY_INFORMATION;
-    }
     let temporary = extended_length_path(temporary).unwrap();
     let error = unsafe {
         SetNamedSecurityInfoW(
@@ -109,7 +96,7 @@ fn seed_non_dacl_metadata(source: &Path, temporary: &Path) {
             owner,
             group,
             null_mut(),
-            sacl,
+            null_mut(),
         )
     };
     assert_eq!(
@@ -132,6 +119,9 @@ fn probe_success(case: &str, seed_metadata: bool) {
 $ErrorActionPreference = 'Stop'
 $acl = [System.IO.File]::GetAccessControl($env:HERDR_TEST_CONFIG_SOURCE)
 $acl.SetAccessRuleProtection(${}, $false)
+$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$rule = [System.Security.AccessControl.FileSystemAccessRule]::new($sid, [System.Security.AccessControl.FileSystemRights]::FullControl, [System.Security.AccessControl.AccessControlType]::Allow)
+$acl.AddAccessRule($rule)
 [System.IO.File]::SetAccessControl($env:HERDR_TEST_CONFIG_SOURCE, $acl)
 "#,
                 case == "protected"
@@ -228,12 +218,22 @@ $acl.AddAccessRule($rule)
         );
         assert!(String::from_utf16_lossy(&expected).contains(";;;LW)"));
         if seed_metadata {
-            seed_non_dacl_metadata(&source, &temporary);
+            // The bare probe retained the low label but not owner/group.
+            // Test only that missing supplement; do not reapply DACLs or labels.
+            seed_owner_and_group(&source, &temporary);
         }
     }
     stage.write_all(b"complete new preferences").unwrap();
     stage.sync_all().unwrap();
     drop(stage);
+    // Permission setup must not make the source itself unwritable.
+    drop(
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&source)
+            .unwrap(),
+    );
     replace(&source, &temporary, &backup).unwrap();
     let actual = snapshot(&source);
     let backup_security = snapshot(&backup);

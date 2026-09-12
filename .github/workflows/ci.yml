@@ -172,7 +172,8 @@ jobs:
         if: matrix.kind == 'windows' && !cancelled()
         shell: pwsh
         run: |
-          cargo nextest run --locked -E 'test(native_replace_probe)' --no-fail-fast --status-level all --final-status-level all --success-output immediate --failure-output immediate
+          $env:CARGO_INCREMENTAL = "1"
+          cargo nextest run --locked -E 'test(native_replace_probe)' --no-fail-fast --status-level pass --final-status-level pass --success-output immediate --failure-output immediate
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Smoke ConPTY pane
