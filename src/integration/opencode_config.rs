@@ -6,7 +6,7 @@ use jsonc_parser::cst::{CstInputValue, CstRootNode};
 use jsonc_parser::ParseOptions;
 use serde_json::Value;
 
-use super::config_file::write_config;
+use super::config_file::{check_config_target, write_config};
 
 const TUI_CONFIG_NAME: &str = "tui.jsonc";
 
@@ -46,6 +46,7 @@ pub(crate) fn add_cli_plugin(
     plugin_spec: &str,
 ) -> io::Result<Option<PathBuf>> {
     let path = config_dir.join("cli.json");
+    check_config_target(&path)?;
     // OpenCode imports V1 TUI preferences (`tui.json`, `kv.json`) into cli.json on
     // its first V2 start, but only while cli.json is absent. Defer registration
     // while those sources still exist so we do not skip the migration; otherwise
@@ -62,6 +63,7 @@ fn cli_migration_pending(config_dir: &Path, state_dir: &Path) -> bool {
 }
 
 fn add_plugin(config_path: PathBuf, key: &str, plugin_spec: &str) -> io::Result<PathBuf> {
+    check_config_target(&config_path)?;
     let content = if config_path.is_file() {
         fs::read_to_string(&config_path)?
     } else {
@@ -105,6 +107,7 @@ pub(crate) fn remove_cli_plugin(config_dir: &Path, plugin_spec: &str) -> io::Res
 }
 
 fn remove_plugin(config_path: &Path, key: &str, plugin_spec: &str) -> io::Result<bool> {
+    check_config_target(config_path)?;
     if !config_path.is_file() {
         return Ok(false);
     }

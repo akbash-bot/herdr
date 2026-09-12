@@ -23,10 +23,16 @@ impl Drop for Directory {
     }
 }
 
+// Windows existing files have separate native backup/recovery coverage.
+#[cfg(unix)]
+const ATOMIC_CASES: &[bool] = &[false, true];
+#[cfg(windows)]
+const ATOMIC_CASES: &[bool] = &[false];
+
 #[test]
 fn config_publication_keeps_old_content_until_commit() {
     let dir = Directory::new();
-    for existing in [false, true] {
+    for &existing in ATOMIC_CASES {
         let path = dir.0.join(if existing { "existing" } else { "new" });
         if existing {
             fs::write(&path, b"old preferences").unwrap();
@@ -44,22 +50,30 @@ fn config_publication_keeps_old_content_until_commit() {
         staged.commit().unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"complete new preferences");
     }
-    assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 2);
+    assert_eq!(fs::read_dir(&dir.0).unwrap().count(), ATOMIC_CASES.len());
 }
 
 #[test]
 fn abandoned_and_failed_publication_leave_config_unchanged() {
-    let dir = Directory::new();
-    let path = dir.0.join("config");
-    fs::write(&path, b"original").unwrap();
-    drop(Replacement::prepare(&path, b"new").unwrap());
-    let staged = Replacement::prepare(&path, b"new").unwrap();
-    fs::remove_file(&staged.temporary).unwrap();
-    assert_eq!(staged.commit().unwrap_err().kind(), io::ErrorKind::NotFound);
-    assert_eq!(fs::read(&path).unwrap(), b"original");
-    assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 1);
-    assert!(write_config(&dir.0, b"not a file").is_err());
-    assert!(dir.0.is_dir());
+    for &existing in ATOMIC_CASES {
+        let dir = Directory::new();
+        let path = dir.0.join("config");
+        if existing {
+            fs::write(&path, b"original").unwrap();
+        }
+        drop(Replacement::prepare(&path, b"new").unwrap());
+        let staged = Replacement::prepare(&path, b"new").unwrap();
+        fs::remove_file(&staged.temporary).unwrap();
+        assert_eq!(staged.commit().unwrap_err().kind(), io::ErrorKind::NotFound);
+        if existing {
+            assert_eq!(fs::read(&path).unwrap(), b"original");
+        } else {
+            assert!(!path.exists());
+        }
+        assert_eq!(fs::read_dir(&dir.0).unwrap().count(), usize::from(existing));
+        assert!(write_config(&dir.0, b"not a file").is_err());
+        assert!(dir.0.is_dir());
+    }
 }
 
 #[test]
@@ -68,8 +82,10 @@ fn hard_links_are_rejected_before_staging_and_rechecked_before_commit() {
     let path = dir.0.join("config");
     let alias = dir.0.join("alias");
     fs::write(&path, b"original").unwrap();
+    #[cfg(unix)]
     let staged = Replacement::prepare(&path, b"new").unwrap();
     fs::hard_link(&path, &alias).unwrap();
+    #[cfg(unix)]
     assert!(staged
         .commit()
         .unwrap_err()

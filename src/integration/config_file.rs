@@ -1,4 +1,4 @@
-//! Atomic writes for user-owned integration configuration, not managed assets.
+//! Protected writes for user-owned integration configuration, not managed assets.
 
 use std::fs::{self, OpenOptions};
 use std::io;
@@ -12,11 +12,16 @@ static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
 /// Check before changing assets as well as immediately before replacing a config.
 /// This is deliberately not config parsing or a transaction across multiple files.
-pub(super) fn reject_hard_linked_configs(dir: &Path, names: &[&str]) -> io::Result<()> {
+pub(super) fn check_config_targets(dir: &Path, names: &[&str]) -> io::Result<()> {
     for name in names {
-        reject_hard_links(&dir.join(name))?;
+        check_config_target(&dir.join(name))?;
     }
     Ok(())
+}
+
+pub(super) fn check_config_target(path: &Path) -> io::Result<()> {
+    reject_hard_links(path)?;
+    crate::platform::check_config_write_target(&resolve_target(path)?)
 }
 
 fn reject_hard_links(path: &Path) -> io::Result<()> {
@@ -65,7 +70,12 @@ fn resolve_target(path: &Path) -> io::Result<PathBuf> {
 }
 
 pub(super) fn write_config(path: &Path, contents: impl AsRef<[u8]>) -> io::Result<()> {
-    let replacement = Replacement::prepare(path, contents.as_ref())?;
+    check_config_target(path)?;
+    let target = resolve_target(path)?;
+    if crate::platform::write_existing_config(&target, contents.as_ref())? {
+        return Ok(());
+    }
+    let replacement = Replacement::prepare(&target, contents.as_ref())?;
     replacement.commit()
 }
 

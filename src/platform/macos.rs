@@ -28,6 +28,18 @@ pub(crate) fn config_file_link_count(path: &Path) -> std::io::Result<u64> {
     Ok(std::fs::metadata(path)?.nlink())
 }
 
+pub(crate) fn check_config_write_target(_target: &std::path::Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+pub(crate) fn write_existing_config(
+    _target: &std::path::Path,
+    _contents: &[u8],
+) -> std::io::Result<bool> {
+    // Unix keeps atomic replacement for existing files too.
+    Ok(false)
+}
+
 pub(crate) fn create_config_temporary(
     path: &Path,
     private: bool,

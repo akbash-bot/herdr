@@ -14,11 +14,7 @@ use std::{
 };
 
 mod clipboard_image;
-// Validate the recovery-backed candidate natively before routing config writes to it.
-#[cfg(test)]
 mod config_backup;
-#[cfg(test)]
-mod config_file_tests;
 
 pub(crate) fn classify_child_exit(status: &portable_pty::ExitStatus) -> super::ChildExitReason {
     // STATUS_CONTROL_C_EXIT is reported without a Unix signal by portable-pty.
@@ -209,110 +205,34 @@ pub(crate) fn write_config_temporary(
     contents: &[u8],
 ) -> std::io::Result<()> {
     use std::io::Write;
-    use std::os::windows::fs::OpenOptionsExt;
-    use windows_sys::Win32::{
-        Foundation::GENERIC_WRITE,
-        Security::{
-            Authorization::{SetSecurityInfo, SE_FILE_OBJECT},
-            GetSecurityDescriptorControl, GetSecurityDescriptorDacl, GetSecurityDescriptorGroup,
-            GetSecurityDescriptorOwner, GetSecurityDescriptorSacl, DACL_SECURITY_INFORMATION,
-            GROUP_SECURITY_INFORMATION, LABEL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
-            PROTECTED_DACL_SECURITY_INFORMATION, SE_DACL_PROTECTED,
-            UNPROTECTED_DACL_SECURITY_INFORMATION,
-        },
-        Storage::FileSystem::{WRITE_DAC, WRITE_OWNER},
-    };
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).truncate(true);
     if source.is_some() {
-        // TRUNCATE_EXISTING requires the GENERIC_WRITE bit, not its mapped
-        // FILE_GENERIC_WRITE rights, even though those grant equivalent access.
-        options.access_mode(GENERIC_WRITE | WRITE_DAC | WRITE_OWNER);
+        // If preparation finds an existing file, leave it to the recovery-backed
+        // path instead of applying replacement-file permissions.
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "config appeared while preparing a new file; retry the update",
+        ));
     }
-    let mut output = options.open(temporary)?;
-    if let Some(source) = source {
-        let information = OWNER_SECURITY_INFORMATION
-            | GROUP_SECURITY_INFORMATION
-            | DACL_SECURITY_INFORMATION
-            | LABEL_SECURITY_INFORMATION;
-        let mut descriptor = config_security_descriptor(source, information)?;
-        let expected = config_security_sddl(&mut descriptor, information)?;
-        let mut control = 0;
-        let mut revision = 0;
-        if unsafe {
-            GetSecurityDescriptorControl(
-                descriptor.as_mut_ptr().cast(),
-                &mut control,
-                &mut revision,
-            )
-        } == 0
-        {
-            return Err(std::io::Error::last_os_error());
-        }
-        let protection = if control & SE_DACL_PROTECTED != 0 {
-            PROTECTED_DACL_SECURITY_INFORMATION
-        } else {
-            UNPROTECTED_DACL_SECURITY_INFORMATION
-        };
-        let mut owner = null_mut();
-        let mut group = null_mut();
-        let mut dacl = null_mut();
-        let mut sacl = null_mut();
-        let mut defaulted = 0;
-        let mut present = 0;
-        let descriptor = descriptor.as_mut_ptr().cast();
-        if unsafe { GetSecurityDescriptorOwner(descriptor, &mut owner, &mut defaulted) } == 0
-            || unsafe { GetSecurityDescriptorGroup(descriptor, &mut group, &mut defaulted) } == 0
-            || unsafe {
-                GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted)
-            } == 0
-            || unsafe {
-                GetSecurityDescriptorSacl(descriptor, &mut present, &mut sacl, &mut defaulted)
-            } == 0
-        {
-            return Err(std::io::Error::last_os_error());
-        }
-        // Files require SetSecurityInfo, not SetKernelObjectSecurity: the latter
-        // drops the filesystem ACL's automatic-inheritance metadata.
-        let error = unsafe {
-            SetSecurityInfo(
-                output.as_raw_handle(),
-                SE_FILE_OBJECT,
-                information | protection,
-                owner,
-                group,
-                dacl,
-                sacl,
-            )
-        };
-        if error != 0 {
-            return Err(std::io::Error::from_raw_os_error(error as i32));
-        }
-        let mut installed = config_security_descriptor(temporary, information)?;
-        let installed = config_security_sddl(&mut installed, information)?;
-        if installed != expected {
-            #[cfg(test)]
-            eprintln!(
-                "config ACL mismatch: expected {}, installed {}",
-                String::from_utf16_lossy(&expected),
-                String::from_utf16_lossy(&installed),
-            );
-            // An unprotected file moved from another directory can retain old
-            // inherited permissions. Never put secrets into a temporary whose
-            // new parent added access, even if publication would be rejected.
-            return Err(std::io::Error::other(
-                "cannot preserve config access controls during atomic replacement",
-            ));
-        }
-        // Only copy sensitive contents/streams after access controls match.
-        // CopyFile preserves attributes, encryption and alternate streams.
-        std::fs::copy(source, temporary)?;
-        output.set_len(0)?;
-    }
+    let mut output = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(temporary)?;
     output.write_all(contents)?;
     output.sync_all()
 }
 
+pub(crate) fn check_config_write_target(target: &std::path::Path) -> std::io::Result<()> {
+    config_backup::check_recovery(target)
+}
+
+pub(crate) fn write_existing_config(
+    target: &std::path::Path,
+    contents: &[u8],
+) -> std::io::Result<bool> {
+    config_backup::write_existing(target, contents)
+}
+
+#[cfg(test)]
 fn config_security_descriptor(
     path: &std::path::Path,
     information: windows_sys::Win32::Security::OBJECT_SECURITY_INFORMATION,
@@ -340,6 +260,7 @@ fn config_security_descriptor(
     Ok(descriptor)
 }
 
+#[cfg(test)]
 fn config_security_sddl(
     descriptor: &mut [u8],
     information: windows_sys::Win32::Security::OBJECT_SECURITY_INFORMATION,
