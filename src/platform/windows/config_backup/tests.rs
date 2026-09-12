@@ -163,7 +163,7 @@ $acl.AddAccessRule($rule)
             assert_eq!(fs::read(&complete).unwrap(), b"original preferences");
             assert_eq!(fs::read(&source).unwrap(), b"original preferences");
             assert!(!pending.exists());
-            let private = String::from_utf16_lossy(&security(&complete)).into_owned();
+            let private = String::from_utf16_lossy(&security(&complete));
             assert!(
                 private.contains("D:P") && !private.contains(";;;BG)"),
                 "{private}"
@@ -339,6 +339,8 @@ fn completed_write_cleanup_failure_and_foreign_backups_are_reported() {
     assert_eq!(fs::read(&complete).unwrap(), b"original");
     assert!(write_existing(&path, b"retry").is_err());
     let mut permissions = fs::metadata(&complete).unwrap().permissions();
+    // This Windows-only fixture clears FILE_ATTRIBUTE_READONLY, not Unix mode bits.
+    #[allow(clippy::permissions_set_readonly_false)]
     permissions.set_readonly(false);
     fs::set_permissions(&complete, permissions).unwrap();
 }
