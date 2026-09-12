@@ -313,6 +313,8 @@ fn interrupted_backups_and_writes_are_distinguishable() {
 
 #[test]
 fn completed_write_cleanup_failure_and_foreign_backups_are_reported() {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
     let dir = Directory::new("cleanup");
     let path = dir.0.join("config");
     fs::write(&path, b"original").unwrap();
@@ -322,11 +324,15 @@ fn completed_write_cleanup_failure_and_foreign_backups_are_reported() {
     assert_eq!(fs::read(&complete).unwrap(), b"foreign contents");
     assert_eq!(fs::read(&path).unwrap(), b"original");
     fs::remove_file(&complete).unwrap();
+    let mut held = None;
     let error = write_observed(&path, b"saved", |phase| {
         if phase == Phase::Committed {
-            let mut permissions = fs::metadata(&complete)?.permissions();
-            permissions.set_readonly(true);
-            fs::set_permissions(&complete, permissions)?;
+            held = Some(
+                OpenOptions::new()
+                    .read(true)
+                    .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                    .open(&complete)?,
+            );
         }
         Ok(())
     })
@@ -338,11 +344,7 @@ fn completed_write_cleanup_failure_and_foreign_backups_are_reported() {
     assert_eq!(fs::read(&path).unwrap(), b"saved");
     assert_eq!(fs::read(&complete).unwrap(), b"original");
     assert!(write_existing(&path, b"retry").is_err());
-    let mut permissions = fs::metadata(&complete).unwrap().permissions();
-    // This Windows-only fixture clears FILE_ATTRIBUTE_READONLY, not Unix mode bits.
-    #[allow(clippy::permissions_set_readonly_false)]
-    permissions.set_readonly(false);
-    fs::set_permissions(&complete, permissions).unwrap();
+    drop(held);
 }
 
 #[test]
