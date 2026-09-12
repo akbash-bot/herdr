@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn powershell(script: &str, source: &std::path::Path) -> String {
+fn powershell(script: &str, source: &std::path::Path) -> String {
     let output = std::process::Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .env("HERDR_TEST_CONFIG_SOURCE", source)
