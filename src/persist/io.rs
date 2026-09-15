@@ -7,7 +7,7 @@ use super::snapshot::{
     SessionSnapshot, SNAPSHOT_VERSION,
 };
 
-fn session_path() -> PathBuf {
+pub(crate) fn session_path() -> PathBuf {
     crate::session::data_dir().join("session.json")
 }
 
@@ -112,13 +112,14 @@ pub fn clear_history() {
 
 pub fn load() -> Option<SessionSnapshot> {
     let path = session_path();
-    if !path.exists() {
-        return None;
-    }
     let content = match std::fs::read_to_string(&path) {
         Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            crate::logging::session_restored(&path, 0, "missing");
+            return None;
+        }
         Err(err) => {
-            warn!(err = %err, "failed to read session file");
+            crate::logging::session_restore_failed(&path, "read_error", &err.to_string());
             return None;
         }
     };
@@ -127,15 +128,17 @@ pub fn load() -> Option<SessionSnapshot> {
         Err(err) => {
             if let Some(version) = snapshot_file_version(&content) {
                 if version > SNAPSHOT_VERSION {
-                    warn!(
-                        file_version = version,
-                        supported = SNAPSHOT_VERSION,
-                        "session file is from a newer herdr version, ignoring"
+                    crate::logging::session_restore_failed(
+                        &path,
+                        "unsupported_version",
+                        &format!(
+                            "snapshot version {version} is newer than supported {SNAPSHOT_VERSION}"
+                        ),
                     );
                     return None;
                 }
             }
-            warn!(err = %err, "failed to parse session file, ignoring");
+            crate::logging::session_restore_failed(&path, "parse_error", &err);
             None
         }
     }

@@ -661,6 +661,103 @@ fn server_stop_then_restart_restores_pane_history() {
 }
 
 #[test]
+fn server_start_reports_session_load_outcomes() {
+    for (outcome, content) in [
+        ("missing", None),
+        ("read_error", None),
+        ("parse_error", Some("{")),
+        (
+            "unsupported_version",
+            Some(r#"{"version":4294967295,"workspaces":{"future_schema":true}}"#),
+        ),
+        ("empty", Some(r#"{"version":3,"workspaces":[]}"#)),
+    ] {
+        let base = unique_test_dir();
+        let config_home = base.join("config");
+        let runtime_dir = base.join("runtime");
+        let session = "restore-log";
+        let data_dir = config_home
+            .join(app_dir_name())
+            .join("sessions")
+            .join(session);
+        let session_path = data_dir.join("session.json");
+        fs::create_dir_all(&data_dir).unwrap();
+        if let Some(content) = content {
+            fs::write(&session_path, content).unwrap();
+        } else if outcome == "read_error" {
+            // A symlink loop deterministically fails lookup, even when running as root.
+            std::os::unix::fs::symlink("session.json", &session_path).unwrap();
+        }
+
+        let server = spawn_named_server(&config_home, &runtime_dir, session);
+        wait_for_socket(
+            &named_session_socket(&config_home, session),
+            Duration::from_secs(5),
+        );
+        // The API socket opens before restore; a completed request proves startup finished.
+        let workspaces = run_named_cli_json(
+            &config_home,
+            &runtime_dir,
+            &["--session", session, "workspace", "list"],
+        );
+        let log = fs::read_to_string(data_dir.join("herdr-server.log")).unwrap();
+        let unchanged = if let Some(content) = content {
+            fs::read(&session_path).unwrap() == content.as_bytes()
+        } else if outcome == "read_error" {
+            fs::read_link(&session_path).unwrap() == Path::new("session.json")
+        } else {
+            fs::symlink_metadata(&session_path).is_err()
+        };
+        let stopped = run_named_cli(&config_home, &runtime_dir, &["session", "stop", session]);
+        drop(server);
+        cleanup_test_base(&base);
+
+        assert!(stopped.status.success());
+        assert!(
+            unchanged,
+            "startup must not modify the {outcome} session file"
+        );
+        assert!(workspaces["result"]["workspaces"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        let entries: Vec<_> = log
+            .lines()
+            .filter(|line| line.contains("event=\"persist.restore\""))
+            .collect();
+        assert_eq!(
+            entries.len(),
+            1,
+            "expected one {outcome} restore event: {log}"
+        );
+        let entry = entries[0];
+        assert!(entry.contains(&format!("outcome=\"{outcome}\"")), "{entry}");
+        assert!(
+            entry.contains(&format!("path={}", session_path.display())),
+            "{entry}"
+        );
+        assert!(
+            entry.contains("subsystem=\"persist\"") && entry.contains("workspaces=0"),
+            "{entry}"
+        );
+        if matches!(
+            outcome,
+            "read_error" | "parse_error" | "unsupported_version"
+        ) {
+            assert!(entry.contains("WARN") && entry.contains("err="), "{entry}");
+        } else {
+            assert!(entry.contains("INFO"), "{entry}");
+        }
+        if outcome == "unsupported_version" {
+            assert!(
+                entry.contains("4294967295") && entry.contains("supported 3"),
+                "{entry}"
+            );
+        }
+    }
+}
+
+#[test]
 fn server_start_restores_legacy_session_through_api_identity() {
     let base = unique_test_dir();
     let config_home = base.join("config");
@@ -725,6 +822,22 @@ fn server_start_restores_legacy_session_through_api_identity() {
             && pane["cwd"] == herdr_cwd
             && pane["focused"] == true
     }));
+
+    let log = fs::read_to_string(data_dir.join("herdr-server.log")).unwrap();
+    let restores: Vec<_> = log
+        .lines()
+        .filter(|line| line.contains("event=\"persist.restore\""))
+        .collect();
+    assert_eq!(restores.len(), 1);
+    let restore = restores[0];
+    assert!(
+        restore.contains("outcome=\"ok\"") && restore.contains("workspaces=1"),
+        "{restore}"
+    );
+    assert!(
+        restore.contains(&format!("path={}", data_dir.join("session.json").display())),
+        "{restore}"
+    );
 
     let reported = run_cli(
         &socket_path,

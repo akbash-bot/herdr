@@ -370,6 +370,7 @@ impl App {
         // Try to restore previous session
         let mut restored_terminals = std::collections::HashMap::new();
         let mut restored_terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        let session_path = crate::persist::session_path();
         let (workspaces, active, selected) = if !policy.restore_session {
             (Vec::new(), None, 0)
         } else if let Some(snap) = crate::persist::load() {
@@ -394,10 +395,10 @@ impl App {
             restored_terminals = terminals;
             restored_terminal_runtimes = terminal_runtimes.into();
             if ws.is_empty() {
-                crate::logging::session_restored(0, "empty");
+                crate::logging::session_restored(&session_path, 0, "empty");
                 (Vec::new(), None, 0)
             } else {
-                crate::logging::session_restored(ws.len(), "ok");
+                crate::logging::session_restored(&session_path, ws.len(), "ok");
                 let active = snap.active.filter(|&i| i < ws.len());
                 let selected = snap.selected.min(ws.len().saturating_sub(1));
                 (ws, active, selected)

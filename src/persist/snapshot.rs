@@ -468,7 +468,14 @@ pub(super) fn parse_history_snapshot(content: &str) -> Result<SessionHistorySnap
 }
 
 pub(super) fn snapshot_file_version(content: &str) -> Option<u32> {
-    serde_json::from_str::<RawSessionSnapshot>(content)
+    // Version diagnostics must not depend on a future file retaining today's schema.
+    #[derive(Deserialize)]
+    struct Version {
+        #[serde(default)]
+        version: u32,
+    }
+
+    serde_json::from_str::<Version>(content)
         .ok()
         .map(|raw| raw.version)
 }
@@ -1185,6 +1192,16 @@ mod tests {
     fn future_version_is_rejected() {
         let json = r#"{"version":999,"workspaces":[],"active":null,"selected":0}"#;
         assert!(parse_snapshot(json).is_err());
+    }
+
+    #[test]
+    fn version_diagnostics_do_not_require_the_current_schema() {
+        let future = r#"{"version":999,"workspaces":{"future_schema":true}}"#;
+        assert_eq!(snapshot_file_version(future), Some(999));
+        assert!(parse_snapshot(future).is_err());
+        for invalid in ["{", r#"{"version":"unknown"}"#, r#"{"version":4294967296}"#] {
+            assert_eq!(snapshot_file_version(invalid), None);
+        }
     }
 
     #[test]
