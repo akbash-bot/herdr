@@ -1,0 +1,7 @@
+commit=ee064a0c798dd5617d253be7d26aa41f924bab96
+target=x86_64-pc-windows-msvc
+profile=release
+libghostty_vt_optimize=ReleaseSafe
+libghostty_vt_simd=false
+note=Test binary only. Reuse the app-local ConPTY runtime from an existing Herdr 0.9.0 Windows installation.
+bbbf131d13a76638166f64ad0ec02e47d0c7969b97c8d07227250e66b332a31a  /srv/herder-kennel/issues/3111/build/windows/artifact/herdr.exe
