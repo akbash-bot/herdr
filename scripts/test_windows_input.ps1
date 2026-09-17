@@ -41,8 +41,11 @@ if (-not $ExePath) {
     if ($LASTEXITCODE -ne 0) { throw 'Could not identify the source checkout commit' }
     $sourceDirty = [bool](& git -C $repo status --porcelain)
     Write-Host "Building current checkout: $repo"
-    & cargo build --release --locked --manifest-path (Join-Path $repo 'Cargo.toml')
-    if ($LASTEXITCODE -ne 0) { throw "cargo build failed with exit code $LASTEXITCODE" }
+    Push-Location $repo
+    try {
+        & cargo build --release --locked
+        if ($LASTEXITCODE -ne 0) { throw "cargo build failed with exit code $LASTEXITCODE" }
+    } finally { Pop-Location }
     $targetRoot = if ($env:CARGO_TARGET_DIR) { [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR, $repo) } else { Join-Path $repo 'target' }
     $builtExe = Join-Path $targetRoot 'release/herdr.exe'
     $package = Join-Path $repo '.local/windows-input/cache/Microsoft.Windows.Console.ConPTY.nupkg'

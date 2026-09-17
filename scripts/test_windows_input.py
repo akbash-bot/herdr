@@ -46,6 +46,8 @@ class WindowsInputGauntletTests(unittest.TestCase):
             value.pop(field)
             self.assertEqual(verdict(case, "legacy", value)[0], "inconclusive", field)
         self.assertEqual(verdict(case, "legacy", {**good, "outer_geometry": [120, 24]})[0], "inconclusive")
+        for malformed in [1, "121,24", {}, [121], [121, "24"], [True, 24]]:
+            self.assertEqual(verdict(case, "legacy", {**good, "pane_geometry": malformed})[0], "inconclusive")
 
     def test_native_modifiers_release_and_repeat_are_not_discarded(self):
         # type, down, repeat, vk, scan, Unicode, control-state

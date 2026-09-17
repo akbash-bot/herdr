@@ -122,13 +122,18 @@ def verdict(case, mode, evidence):
         return "inconclusive", evidence["error"]
     if evidence.get("path") == "herdr" and case["id"] in ("page-up", "page-down"):
         expected = {"hex": [""]}  # Plain page keys intentionally control Herdr's host scrollback.
-    if evidence.get("outer_geometry", [])[:2] != [evidence.get("width"), evidence.get("height")]:
+    def geometry(name):
+        value = evidence.get(name)
+        return value[:2] if isinstance(value, list) and len(value) >= 2 and all(type(v) is int for v in value[:2]) else None
+    outer, pane = geometry("outer_geometry"), geometry("pane_geometry")
+    final_pane, final_outer = geometry("final_pane_geometry"), geometry("final_outer_geometry")
+    if outer != [evidence.get("width"), evidence.get("height")]:
         return "inconclusive", "Requested geometry was not observed"
-    if len(evidence.get("pane_geometry", [])) < 2 or min(evidence["pane_geometry"][:2]) <= 0:
+    if pane is None or min(pane) <= 0:
         return "inconclusive", "Missing actual pane dimensions"
-    if evidence.get("final_pane_geometry", [])[:2] != evidence["pane_geometry"][:2]:
+    if final_pane != pane:
         return "inconclusive", "Pane geometry changed during capture"
-    if evidence.get("final_outer_geometry", [])[:2] != evidence["outer_geometry"][:2]:
+    if final_outer != outer:
         return "inconclusive", "Outer geometry changed during capture"
     if "vk" in expected:
         records = evidence.get("records")

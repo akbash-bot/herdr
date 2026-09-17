@@ -265,7 +265,11 @@ namespace HerdrInputGauntlet {
         volatile bool running=true;
         Thread reader;
         IntPtr threadHandle;
-        public string Error { get; private set; }
+        string error;
+        public string Error {
+            get { return Volatile.Read(ref error); }
+            private set { Volatile.Write(ref error,value); }
+        }
         public ConsoleProbe(string mode) {
             if(!GetConsoleMode(input,out original) || !GetConsoleMode(output,out outputMode)) throw new Exception("Probe needs a real console");
             cp=GetConsoleCP(); native=mode=="native";

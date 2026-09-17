@@ -34,7 +34,8 @@ try {
         # Allow normal detach / observer disposal before forcing this owned child down.
         if (-not $child.WaitForExit(5000)) {
             $cleanup += 'Child required forced termination; normal console restoration was not qualified'
-            $child.Kill($true); $null = $child.WaitForExit(5000)
+            $child.Kill($true)
+            if (-not $child.WaitForExit(5000)) { $cleanup += 'Child remained active after forced termination' }
         }
         $child.Dispose()
     }

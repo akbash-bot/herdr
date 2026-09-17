@@ -52,9 +52,14 @@ function Invoke-GauntletProcess($Exe, $Arguments, $Plan = $null, [int] $Timeout 
     try {
         $stdout = $process.StandardOutput.ReadToEndAsync()
         $stderr = $process.StandardError.ReadToEndAsync()
+        $timer = [Diagnostics.Stopwatch]::StartNew()
         if (-not $process.WaitForExit($Timeout * 1000)) {
             $process.Kill($true)
             throw "Command timed out: $Exe $($Arguments -join ' ')"
+        }
+        $remaining = [Math]::Max(0, $Timeout * 1000 - [int]$timer.ElapsedMilliseconds)
+        if (-not [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($stdout, $stderr), $remaining)) {
+            throw "Output streams stayed open after exit: $Exe $($Arguments -join ' ')"
         }
         if ($process.ExitCode -ne 0) { throw "Command failed ($($process.ExitCode)): $Exe`n$($stderr.GetAwaiter().GetResult())" }
         return $stdout.GetAwaiter().GetResult()
