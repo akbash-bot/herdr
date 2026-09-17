@@ -40,6 +40,7 @@ function New-GauntletProcess($Exe, $Arguments, $Plan, [switch] $Capture) {
         $info.Environment['XDG_CONFIG_HOME'] = $Plan.config_home
         $info.Environment['HERDR_SESSION'] = $Plan.session
         if ($Plan.profile -ne 'default') { $info.Environment['HERDR_WINDOWS_INPUT_PROBE'] = $Plan.profile }
+        if ($Plan.path -eq 'herdr') { $info.Environment['HERDR_WINDOWS_INPUT_TRACE_FILE'] = $Plan.input_trace }
     }
     $info.RedirectStandardOutput = $Capture.IsPresent
     $info.RedirectStandardError = $Capture.IsPresent

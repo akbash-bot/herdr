@@ -39,6 +39,12 @@ if ($Widths.Count -eq 0 -or $Heights.Count -eq 0 -or @($Widths | Where-Object { 
 Add-Type -Path "$PSScriptRoot/windows_input/Native.cs"
 [HerdrInputGauntlet.Desktop]::AssertNotElevated($PID)
 [HerdrInputGauntlet.Desktop]::Neutral()
+$controllerWindow = [IntPtr]::Zero
+if (@($selectedCases | Where-Object id -eq 'mouse-focus-refresh').Count) {
+    $controllerWindow = [HerdrInputGauntlet.Desktop]::GetForegroundWindow()
+    if ($controllerWindow -eq [IntPtr]::Zero) { throw 'Controller has no foreground window for focus-cycle qualification' }
+    [HerdrInputGauntlet.Desktop]::AssertNotElevated([HerdrInputGauntlet.Desktop]::Pid($controllerWindow))
+}
 $sourceCommit = $null
 $sourceDirty = $null
 if (-not $ExePath) {
@@ -157,7 +163,7 @@ try {
             $shellToml = $pwsh | ConvertTo-Json -Compress
             [IO.File]::WriteAllText($config, "onboarding = false`n[terminal]`ndefault_shell = $shellToml`n[ui]`nmouse_capture = true`n")
             $plan = @{ root = $root; work = $work; nonce = $nonce; session = $nonce; config = $config; config_home = $configHome;
-                path = $path; mode = $mode; profile = $Profile; exe = $exe; pwsh = $pwsh }
+                path = $path; mode = $mode; profile = $Profile; exe = $exe; pwsh = $pwsh; input_trace = (Join-Path $work 'input-transport.log') }
             $planPath = Join-Path $work 'plan.json'
             Write-GauntletJson $planPath $plan
             $window = [IntPtr]::Zero; $windowPid = 0; $server = $null; $launcher = $null; $clipboardSequence = $null; $injectionAuthorized = $false
@@ -230,14 +236,13 @@ try {
                 $phase = 0
                 foreach ($geometry in $geometries) {
                     $phase++
-                    $selected = if ($geometry.full) { $selectedCases } else { @($selectedCases | Where-Object { $_.id -in @('letter-a', 'shift-enter', 'paste-lf') }) }
+                    $selected = if ($geometry.full) { $selectedCases } else { @($selectedCases | Where-Object { $_.id -in @('letter-a', 'shift-enter', 'paste-lf', 'mouse-focus-refresh') }) }
                     $outer = Set-ObservedGeometry $plan $window $windowPid $geometry.width $geometry.height
                     foreach ($case in $selected) {
                         $row = New-Observation $hostName $plan $geometry.width $geometry.height $case
                         $row.phase = $phase
                         $document.observations += $row
                         if ($case.kind -eq 'qualification' -or -not $case.expected.ContainsKey($mode)) { $row.status = 'not_run'; $row.reason = 'Requires separate qualification: ' + $case.id; continue }
-                        if ($case.kind -eq 'mode-transitions' -and $path -ne 'herdr') { $row.status = 'not_run'; $row.reason = 'Runtime transitions are a through-Herdr qualification'; continue }
                         if ($case.kind -eq 'manual' -and -not $Manual) { $row.status = 'not_run'; $row.reason = 'Operator-assisted case; rerun with -Manual and declared layout'; continue }
                         $layoutChords = $null
                         if ($case.kind -eq 'layout-key') {
@@ -263,7 +268,8 @@ try {
                         if ($case.kind -in @('paste', 'mouse-interleave') -and [HerdrInputGauntlet.Desktop]::CountClipboardFormats() -ne 0) {
                             $row.status = 'not_run'; $row.reason = 'Clipboard is not empty; refusing to replace user data'; continue
                         }
-                        if ($case.kind -eq 'mouse-interleave') { $null = Observer-Request $plan 'mouse-on'; $mouseReporting = $true }
+                        if ($case.kind -in @('mouse-interleave', 'mouse-focus-refresh')) { $null = Observer-Request $plan 'mouse-on'; $mouseReporting = $true }
+                        $traceLineCount = if ($path -eq 'herdr' -and (Test-Path -LiteralPath $plan.input_trace)) { @(Get-Content -LiteralPath $plan.input_trace).Count } else { 0 }
                         $begin = Observer-Request $plan 'begin'
                         $row.ready = $true; $row.pane_geometry = $begin.geometry
                         [HerdrInputGauntlet.Desktop]::Guard($window, $nonce, $windowPid)
@@ -285,9 +291,20 @@ try {
                             [HerdrInputGauntlet.Desktop]::MouseMoveInside($window, $nonce, $windowPid, 60)
                             Start-Sleep -Milliseconds 150
                             $null = [HerdrInputGauntlet.Desktop]::Chord($window, $nonce, $windowPid, [int[]]@(66))
+                        } elseif ($case.kind -eq 'mouse-focus-refresh') {
+                            $cursorPosition = [HerdrInputGauntlet.Desktop]::Cursor()
+                            $null = [HerdrInputGauntlet.Desktop]::Chord($window, $nonce, $windowPid, [int[]]@(65))
+                            [HerdrInputGauntlet.Desktop]::MouseClickWheelInside($window, $nonce, $windowPid, -60)
+                            Start-Sleep -Milliseconds 200
+                            $null = [HerdrInputGauntlet.Desktop]::Chord($window, $nonce, $windowPid, [int[]]@(66))
+                            [HerdrInputGauntlet.Desktop]::FocusAwayAndBack($controllerWindow, $window, $nonce, $windowPid)
+                            $null = [HerdrInputGauntlet.Desktop]::Chord($window, $nonce, $windowPid, [int[]]@(67))
+                            [HerdrInputGauntlet.Desktop]::MouseClickWheelInside($window, $nonce, $windowPid, 60)
+                            Start-Sleep -Milliseconds 200
+                            $null = [HerdrInputGauntlet.Desktop]::Chord($window, $nonce, $windowPid, [int[]]@(68))
                         } elseif ($case.kind -eq 'mode-transitions') {
                             foreach ($step in @(
-                                @{ mode = $null; chords = @([int[]]@(65), [int[]]@(16, 13)) },
+                                @{ mode = 'legacy'; chords = @([int[]]@(65), [int[]]@(16, 13)) },
                                 @{ mode = 'mok2'; chords = @([int[]]@(66), [int[]]@(16, 13)) },
                                 @{ mode = 'kitty'; chords = @([int[]]@(67), [int[]]@(16, 13)) },
                                 @{ mode = 'mok2'; chords = @([int[]]@(68), [int[]]@(16, 13)) },
@@ -307,10 +324,18 @@ try {
                         Start-Sleep -Milliseconds 500
                         if ($case.kind -ne 'manual') { [HerdrInputGauntlet.Desktop]::Guard($window, $nonce, $windowPid) }
                         $end = Observer-Request $plan 'end'
+                        if ($case.kind -eq 'mode-transitions') { $null = Observer-Request $plan 'set-mode' $mode }
                         $row.capture_id = $end.id
                         $row.hex = $end.hex; $row.records = $end.records; $row.error = $end.error; $row.complete = $end.quiet_reached
                         $row.final_outer_geometry = (Outer-State $plan).geometry
                         $row.status = 'observed'; $row.final_pane_geometry = $end.geometry
+                        if ($path -eq 'herdr' -and (Test-Path -LiteralPath $plan.input_trace)) {
+                            $traceLines = @(Get-Content -LiteralPath $plan.input_trace)
+                            $trace = $traceLines -join "`n"
+                            $captureTrace = ($traceLines | Select-Object -Skip $traceLineCount) -join "`n"
+                            $row.input_reader = if ($trace.Contains('reader=windows-console')) { 'windows-console' } elseif ($trace.Contains('reader=crossterm')) { 'crossterm' } else { 'unknown' }
+                            if ($captureTrace.Contains('transport=win32-serialized')) { $row.input_transport = 'win32-serialized' }
+                        }
                         if ($null -ne $clipboardSequence) {
                             if (-not [HerdrInputGauntlet.Desktop]::ClearOwnedClipboard($clipboardSequence)) { throw 'Could not clear test-owned clipboard' }
                             $clipboardSequence = $null
@@ -352,7 +377,7 @@ try {
                 }
                 if ($null -ne $server -and -not $server.HasExited) {
                     try { $null = Invoke-GauntletProcess $exe @('session', 'stop', $nonce) $plan }
-                    catch { if (-not $server.WaitForExit(1000)) { $document.cleanup_errors += $_.Exception.Message } }
+                    catch { if (-not $server.WaitForExit(5000)) { $document.cleanup_errors += $_.Exception.Message } }
                 }
                 [IO.File]::WriteAllText((Join-Path $work 'stop'), '')
                 if ($window -ne [IntPtr]::Zero) {

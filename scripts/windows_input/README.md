@@ -1,9 +1,9 @@
 # Local Windows input gauntlet (experimental)
 
-This is **test infrastructure awaiting native Windows qualification**, not a claim
-that all Windows input works. It sends real scan-code gestures through a new
-Windows Terminal window, both directly to an observer and through an attached
-Herdr client. It does not substitute `pane send-keys` for host input.
+This is local Windows qualification infrastructure, not a claim that all Windows
+input works. It sends real scan-code gestures through a new Windows Terminal
+window, both directly to an observer and through an attached Herdr client. It
+does not substitute `pane send-keys` for host input.
 
 ## Safety and prerequisites
 
@@ -46,6 +46,10 @@ From the repository in PowerShell 7:
 ```powershell
 just test-windows-input
 ```
+
+The full catalogue normally exits `2` because operator-assisted and explicitly
+unimplemented qualification cases remain. That is incomplete coverage, not an
+automated test failure; inspect the printed matrix and retained `report.json`.
 
 The recipe itself is the explicit opt-in to foreground input injection. It builds
 the current checkout in release mode, stages that exact binary with the pinned
@@ -114,16 +118,27 @@ Every run needs a **new** output directory. By default it is
 - Automatic active-layout dead-key acute input, plus guided AltGr, extended
   accent, and IME commits, with exact expected committed text.
 - Ordered typing, mouse-motion reports, and bracketed paste in one capture, plus
-  legacy→modifyOtherKeys→Kitty→modifyOtherKeys→legacy transitions without restart.
+  click/wheel reporting before and after a real focus cycle, the same mouse
+  sentinel after resize, and legacy→modifyOtherKeys→Kitty→modifyOtherKeys→legacy
+  transitions without restart.
 
-The catalogue also lists explicit **qualification gaps**: mouse click/drag/wheel
-and right-edge coordinate mapping; visual reflow/wrapping; native held-key repeat;
+The focus/resize mouse check runs in Windows Terminal. It guards Herdr's recovery
+sequence but does not certify the Tabby/Alacritty host-specific report in #4284.
+The catalogue also lists explicit **qualification gaps**: mouse drag and
+right-edge coordinate mapping; visual reflow/wrapping; native held-key repeat;
 lock/keypad combinations; dead-key cancellation; IME cancellation; capture/config
 reload and attach cycles; injected setup/recovery faults; supplementary-plane and
-confirmation-triggering burst paste; image/file clipboard integrations. These are
-recorded `not_run`, not fabricated successes. They need
+confirmation-triggering burst paste; image/file clipboard integrations; and
+positive host-scrollback evidence for native PageUp/PageDown. These are recorded
+`not_run` or `inconclusive`, not fabricated successes. They need
 separate fixtures/oracles before becoming automated assertions. The catalogue is
-broad; this draft is **not fully automated coverage of every row**.
+broad; the automated run does **not cover every row**.
+
+Injected PageUp/PageDown remains `inconclusive` through Herdr. On Windows
+Terminal 1.24, both `SendInput` and `keybd_event` produced zeroed non-key records
+even in the direct-host baseline, so absence of pane input cannot prove that
+Herdr consumed the key. Conclusive qualification requires literal physical input
+plus a positive pane scroll-offset change; that guided check is not automated yet.
 
 ## Evidence and verdicts
 
@@ -139,16 +154,20 @@ The retained directory contains:
 The console ends with a capability matrix derived only from that run's captured
 observations. Filtered, unavailable, or operator-assisted cases remain
 `NOT TESTED` or `MANUAL`; the full evidence and reasons remain in `report.json`.
+The Herdr column is labelled Win32 only after the current binary's selected
+reader decodes a real nonce-owned Win32 serialized record. Configuration defaults
+alone do not select the label; missing runtime evidence prints `UNKNOWN`.
 
 Direct-host and through-Herdr observations are labelled separately. A direct-host
 failure is **not automatically a Herdr bug**. Each row labels its failure scope as
 `direct_host` or `through_herdr_not_yet_attributed`. For example, a terminal may
 intercept Alt+Enter or use a different control-key encoding.
 
-One explicit known-gap rule labels a nonce-bound, complete **WT 1.24 direct-host
-mOK Shift+Enter capture containing exactly CR (`0d`)** as `unsupported`. It does
-not exempt all tests on that version, an empty/malformed capture, Kitty, or any
-through-Herdr failure. Through-Herdr still must preserve the requested gesture.
+One explicit known-gap rule labels nonce-bound, complete **WT 1.24/1.25
+direct-host mOK captures** of Shift/Ctrl/Ctrl+Shift+Enter or Shift+Tab as
+`unsupported` only when they contain the exact legacy bytes. It does not exempt
+other tests or versions, an empty/malformed capture, Kitty, or any through-Herdr
+failure. Through-Herdr still must preserve the requested gesture.
 Unsupported remains incomplete coverage, not green. Review captures before
 adding other capability exceptions; never bless lost Shift information in Herdr
 just to make a report green.
@@ -166,9 +185,8 @@ Exit codes:
 - `2`: coverage is incomplete (including deliberately unimplemented catalogue
   rows, missing hosts, or unavailable geometry).
 
-An empty or missing report never means success. Current full-catalogue runs will
-normally return **2 even if automated checks pass**, until the listed qualification
-gaps acquire evidence. None of these statuses certifies an entire Windows host.
+An empty or missing report never means success. None of these statuses certifies
+an entire Windows host.
 
 ## Cleanup and native handoff
 
@@ -182,12 +200,12 @@ nonce-bearing Terminal window. There is no process-name-wide kill or sweep of
 newly appeared OpenConsole processes. Artifacts are retained. Forced cleanup and
 console-mode mismatches are reported, not hidden behind a passing key test.
 
-Before calling this ready, the Windows execution partner should qualify Stable
-and Preview, real focus-loss/F12 interruption, partial startup, clipboard changes,
-cleanup, and measured width boundaries. Use the old and new Herdr binaries in
-**separate runs** to establish that a known Shift+Enter/paste regression is caught.
-Do not overwrite installations or reuse an earlier server. Native results are
-currently pending; Linux unit tests only validate the catalogue and verdict logic.
+For release-risk input changes, qualify Stable and Preview, real focus-loss/F12
+interruption, partial startup, clipboard changes, cleanup, and measured width
+boundaries. Use old and new Herdr binaries in **separate runs** to establish that
+a known regression is caught. Do not overwrite installations or reuse an earlier
+server. Portable unit tests validate the catalogue and verdict logic; they do not
+replace native Windows evidence.
 
 The existing `windows_conpty_enhanced_input_probe.ps1` remains the downstream API
 control. Existing Rust keyboard/Windows-translator tests remain the deterministic

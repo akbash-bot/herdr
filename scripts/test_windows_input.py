@@ -1,7 +1,7 @@
 """Portable tests of the gauntlet's oracle, not Windows input qualification."""
 import copy
 import unittest
-from scripts.windows_input.report import catalogue, channel_identity_errors, qualification_matrix, summarize, verdict
+from scripts.windows_input.report import catalogue, channel_identity_errors, herdr_protocol_label, known_host_gap, qualification_matrix, summarize, verdict
 
 
 class WindowsInputGauntletTests(unittest.TestCase):
@@ -67,6 +67,19 @@ class WindowsInputGauntletTests(unittest.TestCase):
         balanced = extra + [[1, 0, 1, 16, 42, 0, 0]]
         self.assertEqual(verdict(case, "native", {**self.evidence, "records": balanced})[0], "pass")
 
+    def test_herdr_native_page_keys_must_be_consumed_before_the_pane(self):
+        case = self.cases["page-up"]
+        evidence = {**self.evidence, "path": "herdr", "scans": [73]}
+        records = [[1, 1, 1, 33, 73, 0, 0], [1, 0, 1, 33, 73, 0, 0]]
+        self.assertEqual(verdict(case, "native", {**evidence, "records": []})[0], "inconclusive")
+        self.assertEqual(verdict(case, "native", {**evidence, "records": [[4, 0, 0, 0, 0, 0, 0]]})[0], "inconclusive")
+        self.assertEqual(verdict(case, "native", {**evidence, "records": records})[0], "fail")
+        self.assertEqual(verdict(case, "native", {**evidence, "records": [None]})[0], "inconclusive")
+        self.assertEqual(verdict(case, "native", {**evidence, "path": "direct", "records": records})[0], "pass")
+        for mode in ("legacy", "mok2", "kitty"):
+            self.assertEqual(verdict(case, mode, {**evidence, "hex": ""})[0], "inconclusive")
+            self.assertEqual(verdict(case, mode, {**evidence, "hex": "1b5b357e"})[0], "fail")
+
     def test_paste_requires_one_envelope_and_complete_unicode_payload(self):
         case = self.cases["paste-unicode"]
         payload = case["text"].replace("\n", "\r\n").encode()
@@ -87,25 +100,70 @@ class WindowsInputGauntletTests(unittest.TestCase):
 
     def test_runtime_mode_transition_has_one_exact_order(self):
         case = self.cases["mode-transitions"]
-        expected = case["expected"]["legacy"]["hex"][0]
-        self.assertEqual(verdict(case, "legacy", {**self.evidence, "hex": expected})[0], "pass")
-        self.assertEqual(verdict(case, "legacy", {**self.evidence, "hex": expected + "0d"})[0], "fail")
+        for mode in ("legacy", "mok2", "kitty"):
+            expected = case["expected"][mode]["hex"][0]
+            self.assertEqual(verdict(case, mode, {**self.evidence, "hex": expected})[0], "pass")
+            self.assertEqual(verdict(case, mode, {**self.evidence, "hex": expected + "0d"})[0], "fail")
+        direct = {**self.evidence, "path": "direct"}
+        for observed in ("a\rb\rc\rd\re\rf", "a\rb\rc\x1b[13;2ud\re\rf"):
+            self.assertEqual(verdict(case, "legacy", {**direct, "hex": observed.encode().hex()})[0], "unsupported")
+
+    def test_mouse_focus_refresh_requires_reports_on_both_sides(self):
+        case = self.cases["mouse-focus-refresh"]
+        mouse = b"\x1b[<35;10;5M\x1b[<0;10;5M\x1b[<0;10;5m\x1b[<64;10;5M"
+        good = b"a" + mouse + b"bc" + mouse + b"d"
+        self.assertEqual(verdict(case, "legacy", {**self.evidence, "hex": good.hex()})[0], "pass")
+        for bad in (b"ab" + b"c" + mouse + b"d", b"a" + mouse + b"bcd"):
+            self.assertEqual(verdict(case, "legacy", {**self.evidence, "hex": bad.hex()})[0], "fail")
 
     def test_qualification_matrix_uses_observed_results_only(self):
         observations = [
-            {"case": "shift-enter", "path": "herdr", "mode": "mok2", "status": "pass"},
-            {"case": "shift-enter", "path": "direct", "mode": "legacy", "status": "unsupported"},
-            {"case": "shift-enter", "path": "direct", "mode": "kitty", "status": "pass"},
-            {"case": "shift-enter", "path": "direct", "mode": "kitty", "status": "inconclusive"},
+            {"host": "stable", "case": "shift-enter", "path": "herdr", "mode": "mok2", "status": "pass"},
+            {"host": "stable", "case": "shift-enter", "path": "direct", "mode": "legacy", "status": "unsupported"},
+            {"host": "stable", "case": "shift-enter", "path": "direct", "mode": "kitty", "status": "pass"},
+            {"host": "stable", "case": "shift-enter", "path": "direct", "mode": "kitty", "status": "inconclusive"},
         ]
-        rows = {row[0]: row[1:] for row in qualification_matrix({"observations": observations})}
+        rows = {row[0]: row[1:] for row in qualification_matrix({"channels": ["stable"], "observations": observations})}
         self.assertEqual(rows["Shift+Enter"], ("PASS", "X - becomes Enter", "PASS**"))
         self.assertEqual(rows["Multiline paste"], ("NOT TESTED", "NOT TESTED", "NOT TESTED"))
-        observations.append({"case": "dead-acute", "path": "herdr", "mode": "mok2", "status": "pass"})
-        rows = {row[0]: row[1:] for row in qualification_matrix({"observations": observations})}
+        observations.append({"host": "stable", "case": "dead-acute", "path": "herdr", "mode": "mok2", "status": "pass"})
+        observations.extend([
+            {"host": "stable", "case": "letter-a", "path": "direct", "mode": "legacy", "width": 80, "status": "pass"},
+            {"host": "stable", "case": "shift-enter", "path": "direct", "mode": "legacy", "width": 80, "status": "unsupported"},
+            {"host": "stable", "case": "paste-lf", "path": "direct", "mode": "legacy", "width": 80, "status": "pass"},
+            {"host": "stable", "case": "mouse-focus-refresh", "path": "herdr", "mode": "legacy", "width": 80, "status": "pass"},
+            {"host": "stable", "case": "mouse-focus-refresh", "path": "direct", "mode": "legacy", "width": 80, "status": "pass"},
+            {"host": "stable", "case": "mouse-focus-refresh", "path": "direct", "mode": "kitty", "width": 80, "status": "pass"},
+        ])
+        rows = {row[0]: row[1:] for row in qualification_matrix({"channels": ["stable"], "observations": observations})}
         self.assertEqual(rows["Dead-key composition"][0], "PASS")
+        self.assertEqual(rows["Resize 120 -> 80"][1], "PASS")
+        self.assertEqual(rows["Mouse after resize"], ("PASS", "PASS", "PASS"))
         self.assertEqual(rows["AltGr"], ("MANUAL", "MANUAL", "MANUAL"))
         self.assertEqual(rows["IME composition"], ("MANUAL", "MANUAL", "MANUAL"))
+
+    def test_qualification_matrix_requires_every_selected_channel(self):
+        observations = [
+            {"host": "stable", "case": "shift-enter", "path": "herdr", "mode": "mok2", "status": "pass"},
+        ]
+        for result in ({"channels": ["stable", "preview"], "observations": observations},
+                       {"observations": observations}):
+            rows = {row[0]: row[1:] for row in qualification_matrix(result)}
+            self.assertEqual(rows["Shift+Enter"][0], "PARTIAL")
+
+    def test_herdr_protocol_label_requires_every_run_to_prove_transport(self):
+        result = {"hosts": [{"channel": "stable", "runs": [{"nonce": "one", "path": "herdr", "mode": "native"},
+                                                                  {"nonce": "two", "path": "herdr", "mode": "native"}]}],
+                  "observations": [{"host": "stable", "nonce": "one", "path": "herdr", "mode": "native",
+                                    "input_reader": "windows-console",
+                                    "input_transport": "win32-serialized"}]}
+        self.assertEqual(herdr_protocol_label(result), "Herdr default (UNKNOWN)*")
+        result["observations"].append({"host": "stable", "nonce": "two", "path": "herdr", "mode": "native",
+                                       "input_reader": "windows-console",
+                                       "input_transport": "win32-serialized"})
+        self.assertEqual(herdr_protocol_label(result), "Win32 (Herdr)*")
+        result["hosts"].append({"channel": "preview", "runs": [{"nonce": "one", "path": "herdr", "mode": "native"}]})
+        self.assertEqual(herdr_protocol_label(result), "Herdr default (UNKNOWN)*")
 
     def test_empty_partial_and_duplicate_reports_never_become_green(self):
         self.assertFalse(summarize({})["observed_checks_passed"])
@@ -135,13 +193,14 @@ class WindowsInputGauntletTests(unittest.TestCase):
                         [[True, 1, 1, 65, 30, 97, 0]], [[1, 1, 1, 65, 30, 97, "0"]]]:
             self.assertEqual(verdict(self.cases["letter-a"], "native", {**evidence, "records": records})[0], "inconclusive")
 
-    def test_known_host_gap_does_not_exempt_herdr_or_other_versions(self):
+    def test_known_host_gap_only_exempts_observed_terminal_versions_and_cases(self):
         row = {**self.evidence, "case": "shift-enter", "host": "stable", "path": "direct", "mode": "mok2", "hex": "0d", "phase": 1,
                "width": 120, "height": 30, "outer_geometry": [120, 30], "final_outer_geometry": [120, 30],
                "nonce": "owned", "capture_id": "fresh"}
         for path, version, raw, expected in [("direct", "1.24.11911.0", "0d", "unsupported"),
+                                             ("direct", "1.25.1912.0", "0d", "unsupported"),
+                                             ("direct", "1.26.1.0", "0d", "fail"),
                                              ("herdr", "1.24.11911.0", "0d", "fail"),
-                                             ("direct", "1.25.0.0", "0d", "fail"),
                                              ("direct", "1.24.11911.0", "", "fail")]:
             observation = {**row, "path": path, "hex": raw}
             run = {"nonce": "owned", "path": path, "mode": "mok2", "pid": 123, "hwnd": 456, "terminal_version": version,
@@ -155,6 +214,14 @@ class WindowsInputGauntletTests(unittest.TestCase):
             document["controller_elevated"] = False
             run["elevated"] = True
             self.assertEqual(summarize(document)["observations"][0]["status"], "inconclusive")
+
+    def test_direct_mok_legacy_fallback_is_case_and_version_bounded(self):
+        case = self.cases["shift-tab"]
+        direct = {**self.evidence, "path": "direct", "mode": "mok2", "hex": "1b5b5a"}
+        self.assertTrue(known_host_gap(direct, case, "1.25.2607.10002"))
+        self.assertFalse(known_host_gap(direct, case, "1.26.0.0"))
+        self.assertFalse(known_host_gap({**direct, "path": "herdr"}, case, "1.25.2607.10002"))
+        self.assertFalse(known_host_gap({**direct, "hex": "1b5b32373b323b397e"}, case, "1.25.2607.10002"))
 
     def test_duplicate_channel_identity_is_rejected_at_both_stages(self):
         hosts = [{"channel": name, "launcher_identity": name + "-exe", "installation_identity": name + "-dir",

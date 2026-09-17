@@ -194,6 +194,20 @@ namespace HerdrInputGauntlet {
             } while(DateTime.UtcNow<deadline);
             throw new Exception("Cannot focus test window; no input sent");
         }
+        public static void FocusAwayAndBack(IntPtr other,IntPtr hwnd,string nonce,int pid) {
+            if(other==IntPtr.Zero || other==hwnd) throw new Exception("No separate controller window for focus-cycle qualification");
+            AssertNotElevated(Pid(other));
+            var deadline=DateTime.UtcNow.AddSeconds(3);
+            do {
+                SetForegroundWindow(other);
+                if(GetForegroundWindow()==other) break;
+                Thread.Sleep(100);
+            } while(DateTime.UtcNow<deadline);
+            if(GetForegroundWindow()!=other) throw new Exception("Cannot focus controller window for focus-cycle qualification");
+            Thread.Sleep(250);
+            Focus(hwnd,nonce,pid);
+            Thread.Sleep(250);
+        }
         public static void Neutral() {
             foreach(int key in new[]{0x10,0x11,0x12,0x5B,0x5C,1,2,4})
                 if((GetAsyncKeyState(key)&0x8000)!=0) throw new Exception("Release physical modifiers and mouse buttons before running");
@@ -273,6 +287,28 @@ namespace HerdrInputGauntlet {
             int nx=(int)Math.Round((x-left)*65535.0/(width-1)),ny=(int)Math.Round((y-top)*65535.0/(height-1));
             var input=new Input { Type=0, Data=new Union { Mouse=new Mouse { X=nx,Y=ny,Flags=0xC001 } } };
             if(SendInput(1,new[]{input},Marshal.SizeOf<Input>())!=1) throw new Win32Exception(Marshal.GetLastWin32Error(),"Mouse injection failed");
+        }
+        public static void MouseClickWheelInside(IntPtr hwnd,string nonce,int pid,int offset) {
+            Guard(hwnd,nonce,pid); Neutral(); Rect rect;
+            if(!GetWindowRect(hwnd,out rect)) throw new Win32Exception();
+            int x=(rect.Left+rect.Right)/2+offset,y=(rect.Top+rect.Bottom)/2;
+            if(x<=rect.Left+20 || x>=rect.Right-20 || y<=rect.Top+20 || y>=rect.Bottom-20) throw new Exception("Mouse target is outside the safe window interior");
+            int left=GetSystemMetrics(76),top=GetSystemMetrics(77),width=GetSystemMetrics(78),height=GetSystemMetrics(79);
+            if(width<2 || height<2) throw new Exception("Virtual desktop geometry unavailable");
+            int nx=(int)Math.Round((x-left)*65535.0/(width-1)),ny=(int)Math.Round((y-top)*65535.0/(height-1));
+            var inputs=new[]{
+                new Input { Type=0, Data=new Union { Mouse=new Mouse { X=nx,Y=ny,Flags=0xC001 } } },
+                new Input { Type=0, Data=new Union { Mouse=new Mouse { Flags=0x0002 } } },
+                new Input { Type=0, Data=new Union { Mouse=new Mouse { Flags=0x0004 } } },
+                new Input { Type=0, Data=new Union { Mouse=new Mouse { Data=120,Flags=0x0800 } } }
+            };
+            uint sent=SendInput((uint)inputs.Length,inputs,Marshal.SizeOf<Input>());
+            if(sent!=inputs.Length) {
+                int error=Marshal.GetLastWin32Error();
+                if(sent==2 && SendInput(1,new[]{inputs[2]},Marshal.SizeOf<Input>())!=1)
+                    throw new Win32Exception(Marshal.GetLastWin32Error(),"Mouse injection failed after button-down; release the left mouse button manually");
+                throw new Win32Exception(error,"Mouse click/wheel injection failed");
+            }
         }
         public static void Resize(IntPtr hwnd,string nonce,int pid,int dx,int dy) {
             Guard(hwnd,nonce,pid); Rect r;

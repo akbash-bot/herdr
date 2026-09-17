@@ -47,6 +47,7 @@ def catalogue():
     cases[-1]["expected"]["legacy"] = {"loss": "modifier", "hex": ["0a"]}
     key("tab", 9, "\t")
     key("shift-tab", 9, "\x1b[Z", (16,))
+    cases[-1]["expected"]["mok2"] = {"hex": [hex_of("\x1b[27;2;9~")]}
     cases[-1]["expected"]["kitty"]["hex"].append(hex_of("\x1b[9;2u"))
     key("backspace", 8, "\x7f")
     key("ctrl-backspace", 8, None, (17,), 127, "\x08")
@@ -79,9 +80,11 @@ def catalogue():
         cases.append(dict(id=name, kind="paste", text=text, expected={mode: {"paste": text} for mode in MODES[1:]}))
     cases.append(dict(id="mouse-interleave", kind="mouse-interleave", text="mouse\npaste",
                       expected={mode: {"mouse_interleave": True} for mode in MODES[1:]}))
+    cases.append(dict(id="mouse-focus-refresh", kind="mouse-focus-refresh",
+                      expected={mode: {"mouse_focus_refresh": True} for mode in MODES[1:]}))
     transitions = "a\r" + "b\x1b[27;2;13~" + "c\x1b[13;2u" + "d\x1b[27;2;13~" + "e\r" + "f"
     cases.append(dict(id="mode-transitions", kind="mode-transitions",
-                      expected={"legacy": {"hex": [hex_of(transitions)]}}))
+                      expected={mode: {"hex": [hex_of(transitions)]} for mode in MODES[1:]}))
     cases.append(dict(id="dead-acute", kind="layout-key", dead="´", base_vk=69,
                       expected={mode: {"hex": [hex_of("é")]} for mode in MODES[1:]}))
     for name, prompt, text in [
@@ -129,7 +132,7 @@ def verdict(case, mode, evidence):
         return "inconclusive", "Missing readiness, focus, or complete capture"
     if evidence.get("error"):
         return "inconclusive", evidence["error"]
-    if evidence.get("path") == "herdr" and case["id"] in ("page-up", "page-down"):
+    if evidence.get("path") == "herdr" and case["id"] in ("page-up", "page-down") and "vk" not in expected:
         expected = {"hex": [""]}  # Plain page keys intentionally control Herdr's host scrollback.
     def geometry(name):
         value = evidence.get(name)
@@ -144,6 +147,17 @@ def verdict(case, mode, evidence):
         return "inconclusive", "Pane geometry changed during capture"
     if final_outer != outer:
         return "inconclusive", "Outer geometry changed during capture"
+    if evidence.get("path") == "herdr" and case["id"] in ("page-up", "page-down") and "vk" in expected:
+        records = evidence.get("records")
+        if not isinstance(records, list) or any(not isinstance(record, list) or len(record) != 7
+                                                or not all(type(field) is int for field in record) for record in records):
+            return "inconclusive", "Malformed native record"
+        return (("inconclusive", "No positive host-scrollback evidence for the consumed page key")
+                if all(record[0] in (4, 16) for record in records)
+                else ("fail", "Plain page key unexpectedly reached the pane"))
+    if (evidence.get("path") == "herdr" and case["id"] in ("page-up", "page-down")
+            and evidence.get("hex") == ""):
+        return "inconclusive", "No positive host-scrollback evidence for the consumed page key"
     if "vk" in expected:
         records = evidence.get("records")
         scans = evidence.get("scans", [])
@@ -195,6 +209,20 @@ def verdict(case, mode, evidence):
         newline = rb"(?:\r\n|\r|\n)"
         pattern = b"a" + motion + rb"\x1b\[200~mouse" + newline + rb"paste\x1b\[201~" + motion + b"b"
         return ("pass", "Typing, mouse motion and paste remained ordered") if re.fullmatch(pattern, raw) else ("fail", "Mouse interleave order or payload differs")
+    if expected.get("mouse_focus_refresh"):
+        coords = rb"\d+;\d+"
+        gesture = (rb"(?:\x1b\[<35;" + coords + rb"M)*"
+                   + rb"\x1b\[<0;" + coords + rb"M"
+                   + rb"\x1b\[<0;" + coords + rb"m"
+                   + rb"\x1b\[<64;" + coords + rb"M")
+        pattern = b"a" + gesture + b"b" + b"c" + gesture + b"d"
+        return ("pass", "Click/wheel reporting survived focus loss and regain") if re.fullmatch(pattern, raw) else ("fail", "Mouse reporting failed before or after focus regain")
+    if case["id"] == "mode-transitions" and evidence.get("path") == "direct":
+        legacy_only = hex_of("a\rb\rc\rd\re\rf")
+        kitty_only = hex_of("a\rb\rc\x1b[13;2u" + "d\re\rf")
+        if raw.hex() in {legacy_only, kitty_only}:
+            return "unsupported", "Direct Windows Terminal ignored modifyOtherKeys during the transition chain"
+        return "fail", "Unexpected direct-host runtime transition bytes"
     if "loss" in expected:
         return ("unsupported", "Plain VT cannot preserve modified Enter") if raw.hex() in expected["hex"] else ("fail", "Unexpected plain-VT modified Enter result")
     if "hex" in expected:
@@ -210,13 +238,15 @@ def verdict(case, mode, evidence):
     return ("pass", "One complete paste matches") if normalize(actual) == normalize(expected["paste"]) else ("fail", "Paste payload differs")
 
 
-def known_host_gap(observation, run):
+def known_host_gap(observation, case, terminal_version):
     """A narrowly observed host limitation, never a blanket version exemption."""
-    value = run.get("terminal_version", "")
-    version = re.match(r"^1\.24(?:\.|$)", value) if isinstance(value, str) else None
-    return (version is not None and observation.get("path") == "direct"
-            and observation.get("mode") == "mok2" and observation.get("case") == "shift-enter"
-            and observation.get("hex") == "0d")
+    legacy = case["expected"].get("legacy", {}).get("hex", [])
+    mok2 = case["expected"].get("mok2", {}).get("hex", [])
+    return (observation.get("path") == "direct"
+            and observation.get("mode") == "mok2"
+            and case["id"] in {"shift-enter", "ctrl-enter", "ctrl-shift-enter", "shift-tab"}
+            and re.match(r"^1\.(?:24|25)\.", str(terminal_version)) and set(legacy) != set(mok2)
+            and observation.get("hex") in legacy)
 
 
 def channel_identity_errors(hosts):
@@ -259,8 +289,8 @@ def summarize(document):
                 status, reason = "inconclusive", "Missing non-elevated owned-run binding or fresh capture identity"
             else:
                 captures.add(capture)
-                if status == "fail" and known_host_gap(observation, bound[0]):
-                    status, reason = "unsupported", "Observed WT 1.24 direct-host mOK Shift+Enter→CR limitation; not a Herdr regression"
+                if status == "fail" and known_host_gap(observation, case, bound[0].get("terminal_version")):
+                    status, reason = "unsupported", "Direct host ignored mOK and emitted the case's legacy bytes"
         rows.append({**observation, "status": status, "reason": reason, "failure_scope": scope})
     counts = {status: sum(r["status"] == status for r in rows) for status in ("pass", "fail", "not_run", "unsupported", "inconclusive")}
     # No run may claim all-green just because it produced zero/missing observations.
@@ -271,7 +301,7 @@ def summarize(document):
         for path in document.get("paths") or ("direct", "herdr"):
             for mode in document.get("modes", MODES):
                 for phase, (width, height, full) in enumerate(geometries, 1):
-                    for case_id in selected_cases if full else (case_id for case_id in ("letter-a", "shift-enter", "paste-lf") if case_id in selected_cases):
+                    for case_id in selected_cases if full else (case_id for case_id in ("letter-a", "shift-enter", "paste-lf", "mouse-focus-refresh") if case_id in selected_cases):
                         planned.add((host, path, mode, phase, width, height, case_id))
     missing = planned - seen
     if seen - planned:
@@ -290,6 +320,7 @@ def summarize(document):
 def qualification_matrix(result):
     """Collapse real observations into the user-facing capability summary."""
     rows = result.get("observations", [])
+    required_channels = set(result.get("channels") or ("stable", "preview"))
     manual_cases = {case["id"] for case in catalogue()["cases"] if case["kind"] == "manual"}
     groups = [
         ("Printable keys", {"letter-a", "shift-letter"}, None),
@@ -303,6 +334,8 @@ def qualification_matrix(result):
         ("Paste framing/ordering", {case["id"] for case in catalogue()["cases"] if case["kind"] == "paste"}, None),
         ("Resize 120 -> 80", {"letter-a", "shift-enter", "paste-lf"}, 80),
         ("Mouse while typing/pasting", {"mouse-interleave"}, None),
+        ("Mouse after focus regain", {"mouse-focus-refresh"}, None),
+        ("Mouse after resize", {"mouse-focus-refresh"}, 80),
         ("Dead-key composition", {"dead-acute"}, None),
         ("AltGr", {"altgr-euro"}, None),
         ("IME composition", {"ime-commit"}, None),
@@ -319,10 +352,22 @@ def qualification_matrix(result):
             return "MANUAL"
         if {row.get("case") for row in matched} != case_ids:
             return "PARTIAL" if "pass" in statuses else "INCONCLUSIVE" if "inconclusive" in statuses else "NOT TESTED"
+        if required_channels and {(row.get("host"), row.get("case")) for row in matched} != {
+                (channel, case_id) for channel in required_channels for case_id in case_ids}:
+            return "PARTIAL"
+        if case_ids == {"mode-transitions"} and path == "direct" and statuses <= {"unsupported", "inconclusive"}:
+            return "X - mOK ignored"
         if path == "direct" and modes == {"legacy"} and statuses == {"unsupported"}:
             return "X - becomes Enter" if case_ids == {"shift-enter"} else "X - loses modifier"
-        per_case_passed = all(any(row.get("case") == case_id and row.get("status") == "pass" for row in matched) for case_id in case_ids)
-        if per_case_passed and statuses <= {"pass", "inconclusive"}:
+        def case_passed(case_id):
+            statuses_for_case = {row.get("status") for row in matched if row.get("case") == case_id}
+            return "pass" in statuses_for_case or (width == 80 and path == "direct" and modes == {"legacy"}
+                                                     and case_id == "shift-enter" and statuses_for_case == {"unsupported"})
+        per_case_passed = all(case_passed(case_id) for case_id in case_ids)
+        allowed = {"pass", "inconclusive"}
+        if width == 80 and path == "direct" and modes == {"legacy"}:
+            allowed.add("unsupported")
+        if per_case_passed and statuses <= allowed:
             return "PASS**" if "inconclusive" in statuses else "PASS"
         if "inconclusive" in statuses:
             return "INCONCLUSIVE"
@@ -332,14 +377,25 @@ def qualification_matrix(result):
 
     table = []
     for name, case_ids, width in groups:
-        herdr_modes = {"legacy"} if name in {"Resize 120 -> 80", "Runtime mode transitions"} else {"mok2"} if "Enter" in name or name in {"Dead-key composition", "AltGr", "IME composition"} else {"legacy"}
+        herdr_modes = {"legacy"} if name in {"Mouse after resize", "Runtime mode transitions"} else {"mok2"} if "Enter" in name or name in {"Resize 120 -> 80", "Dead-key composition", "AltGr", "IME composition"} else {"legacy"}
         table.append((name, cell(case_ids, width, "herdr", herdr_modes),
                       cell(case_ids, width, "direct", {"legacy"}), cell(case_ids, width, "direct", {"kitty"})))
     return table
 
 
+def herdr_protocol_label(result):
+    runs = {(host.get("channel"), run.get("path"), run.get("mode"), run.get("nonce"))
+            for host in result.get("hosts", []) for run in host.get("runs", [])
+            if run.get("path") == "herdr" and run.get("nonce")}
+    proven = {(row.get("host"), row.get("path"), row.get("mode"), row.get("nonce"))
+              for row in result.get("observations", [])
+              if row.get("path") == "herdr" and row.get("input_reader") == "windows-console"
+              and row.get("input_transport") == "win32-serialized" and row.get("nonce")}
+    return "Win32 (Herdr)*" if runs and runs <= proven else "Herdr default (UNKNOWN)*"
+
+
 def print_qualification_matrix(result):
-    table = [("Thing", "Win32 (Herdr)*", "Plain VT", "Kitty"), *qualification_matrix(result)]
+    table = [("Thing", herdr_protocol_label(result), "Plain VT", "Kitty"), *qualification_matrix(result)]
     widths = [max(len(str(row[column])) for row in table) for column in range(4)]
     line = lambda row: " | ".join(str(value).ljust(widths[index]) for index, value in enumerate(row))
     print("\nWindows input qualification results")
@@ -347,7 +403,7 @@ def print_qualification_matrix(result):
     print("-+-".join("-" * width for width in widths))
     for row in table[1:]:
         print(line(row))
-    print("* Current-checkout default Herdr path; the gauntlet does not force the Win32 profile.")
+    print("* Herdr protocol label comes from runtime evidence; UNKNOWN is never treated as Win32.")
     print("** At least one capable host passed; host capability gaps remain visible in report.json.")
     print("MANUAL requires an operator-assisted -Manual run; no automated result is claimed.")
 
