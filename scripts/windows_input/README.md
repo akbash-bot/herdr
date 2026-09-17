@@ -16,11 +16,10 @@ An elevation-query failure is also a refusal, not permission to proceed. Start
 PowerShell and Terminal **without Run as administrator**, on a dedicated desktop. There is no unattended CI job or runner permission
 change in this implementation.
 
-Required: Windows, installed PowerShell **7** (`pwsh`), Python 3, and an existing
-Herdr Windows executable with its adjacent bundled ConPTY directory. Stable and
-Preview Windows Terminal are discovered independently through their installed
-packages. Explicit paths are available when discovery does not work. No software
-is installed or updated. The actual Terminal process path/version is recorded,
+Required: Windows, PowerShell **7** (`pwsh`), Python 3, Rust/Cargo, and at least
+one Windows Terminal channel. Stable and Preview are discovered independently
+through their installed packages. Explicit paths are available when discovery
+does not work. No software is installed or updated. The actual Terminal process path/version is recorded,
 not inferred from the requested channel or bundled OpenConsole version. Stable
 and Preview must resolve to distinct installations: the runner compares Windows
 file/directory identities before launch, then checks actual image, installation,
@@ -45,8 +44,13 @@ user clipboard update is left alone. No original clipboard contents are logged.
 From the repository in PowerShell 7:
 
 ```powershell
-just test-windows-input -ExePath 'C:\test-app\herdr.exe' -AllowInputInjection
+just test-windows-input
 ```
+
+The recipe itself is the explicit opt-in to foreground input injection. It builds
+the current checkout in release mode, stages that exact binary with the pinned
+ConPTY runtime, and prints its path and hash. Use `-ExePath` only to compare a
+specific old/new packaged binary.
 
 Or invoke the script directly:
 

@@ -42,21 +42,27 @@ def catalogue():
     key("shift-enter", 13, None, (16,), 13)
     key("ctrl-enter", 13, None, (17,), 13)
     key("ctrl-shift-enter", 13, None, (17, 16), 13)
-    key("alt-enter", 13, None, (18,), 13, "\x1b\r")
     key("tab", 9, "\t")
     key("shift-tab", 9, "\x1b[Z", (16,))
+    cases[-1]["expected"]["kitty"]["hex"].append(hex_of("\x1b[9;2u"))
     key("backspace", 8, "\x7f")
     key("ctrl-backspace", 8, None, (17,), 127, "\x08")
     key("alt-backspace", 8, None, (18,), 127, "\x1b\x7f")
     key("escape", 27, "\x1b")
     # Kitty's disambiguation flag encodes Escape distinctly.
     cases[-1]["expected"]["kitty"] = {"hex": [hex_of("\x1b[27u")]}
-    for name, vk, seq in [("up", 38, "A"), ("down", 40, "B"), ("right", 39, "C"), ("left", 37, "D"), ("home", 36, "H"), ("end", 35, "F")]:
+    for name, vk, seq, kitty in [("up", 38, "A", 57419), ("down", 40, "B", 57420), ("right", 39, "C", 57418),
+                                 ("left", 37, "D", 57417), ("home", 36, "H", 57423), ("end", 35, "F", 57424)]:
         for prefix, modifiers, modifier in [("", (), 1), ("shift-", (16,), 2), ("ctrl-", (17,), 5), ("ctrl-shift-", (17, 16), 6)]:
+            if prefix == "ctrl-shift-" and name in ("up", "down", "home", "end"):
+                continue
             key(prefix + name, vk, "\x1b[" + ("" if modifier == 1 else f"1;{modifier}") + seq, modifiers)
-    for name, vk, code in [("insert", 45, 2), ("delete", 46, 3), ("page-up", 33, 5), ("page-down", 34, 6)]:
+            cases[-1]["expected"]["kitty"]["hex"].append(hex_of(f"\x1b[{kitty}{'' if modifier == 1 else f';{modifier}'}u"))
+    for name, vk, code, kitty in [("insert", 45, 2, 57425), ("delete", 46, 3, 57426),
+                                  ("page-up", 33, 5, 57421), ("page-down", 34, 6, 57422)]:
         key(name, vk, f"\x1b[{code}~")
-    for letter in "acdj lmqsu vz".replace(" ", ""):
+        cases[-1]["expected"]["kitty"]["hex"].append(hex_of(f"\x1b[{kitty}u"))
+    for letter in "acdj lmqsu z".replace(" ", ""):
         key("ctrl-" + letter, ord(letter.upper()), None, (17,), ord(letter), chr(ord(letter) - 96))
     key("alt-v", 86, None, (18,), ord("v"), "\x1bv")
     for name, text in [
@@ -89,6 +95,12 @@ def catalogue():
         ("wrap-rendering", "Verify the displayed ruler and wrapped multiline text at both window heights and every observed width."),
         ("capture-refresh", "Toggle mouse capture/config reload, refocus, detach/reattach; repeat paste and Shift+Enter."),
         ("setup-recovery", "Inject a recoverable setup failure and late VT activation; verify mode restoration and the same input sentinels."),
+        ("ctrl-v", "Qualify raw Ctrl+V only with the Windows Terminal paste binding explicitly removed."),
+        ("alt-enter", "Qualify Alt+Enter with the Windows Terminal fullscreen binding explicitly controlled."),
+        ("ctrl-shift-up", "Qualify Ctrl+Shift+Up with the Windows Terminal scroll binding explicitly controlled."),
+        ("ctrl-shift-down", "Qualify Ctrl+Shift+Down with the Windows Terminal scroll binding explicitly controlled."),
+        ("ctrl-shift-home", "Qualify Ctrl+Shift+Home with the Windows Terminal scroll binding explicitly controlled."),
+        ("ctrl-shift-end", "Qualify Ctrl+Shift+End with the Windows Terminal scroll binding explicitly controlled."),
         ("paste-supplementary", "Qualify supplementary-plane clipboard text, including emoji, against the direct-host baseline."),
         ("paste-burst", "Qualify a 200-line clipboard burst with the host multiline-paste warning configured or handled explicitly."),
         ("clipboard-nontext", "Qualify supported image/file clipboard integrations separately; do not infer from text paste."),
@@ -108,6 +120,8 @@ def verdict(case, mode, evidence):
         return "inconclusive", "Missing readiness, focus, or complete capture"
     if evidence.get("error"):
         return "inconclusive", evidence["error"]
+    if evidence.get("path") == "herdr" and case["id"] in ("page-up", "page-down"):
+        expected = {"hex": [""]}  # Plain page keys intentionally control Herdr's host scrollback.
     if evidence.get("outer_geometry", [])[:2] != [evidence.get("width"), evidence.get("height")]:
         return "inconclusive", "Requested geometry was not observed"
     if len(evidence.get("pane_geometry", [])) < 2 or min(evidence["pane_geometry"][:2]) <= 0:
@@ -259,7 +273,26 @@ def main():
     result = catalogue() if args.command == "matrix" else summarize(json.loads(args.input.read_text(encoding="utf-8-sig")))
     args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     if args.command == "report":
-        print(json.dumps({**result["counts"], "coverage_missing": result["coverage_missing"]}))
+        counts = result["counts"]
+        through_failures = sum(row["status"] == "fail" and row.get("path") == "herdr" for row in result["observations"])
+        direct_failures = sum(row["status"] == "fail" and row.get("path") == "direct" for row in result["observations"])
+        print(f"Observed: {counts['pass']} pass, {counts['fail']} fail, {counts['unsupported']} unsupported, "
+              f"{counts['inconclusive']} inconclusive, {counts['not_run']} not run; "
+              f"{result['coverage_missing']} planned rows missing")
+        if through_failures:
+            print(f"Assessment: {through_failures} through-Herdr failures need attribution; inspect report.json before treating them as product regressions")
+        elif result.get("errors") or result.get("cleanup_errors"):
+            print("Assessment: harness or cleanup failed; this run does not qualify input behavior")
+        elif direct_failures:
+            print(f"Assessment: {direct_failures} direct-host differences observed; these are not automatically Herdr bugs")
+        elif counts["inconclusive"] or counts["not_run"] or counts["unsupported"] or result["coverage_missing"]:
+            print("Assessment: observed assertions passed, but host limitations or qualification gaps remain")
+        else:
+            print("Assessment: all planned observed assertions passed")
+        if result.get("errors"):
+            print("Run errors: " + " | ".join(result["errors"]))
+        if result.get("cleanup_errors"):
+            print("Cleanup errors: " + " | ".join(result["cleanup_errors"]))
         return 1 if result["counts"]["fail"] or result.get("errors") or result.get("cleanup_errors") else 2 if not result["observed_checks_passed"] else 0
     return 0
 

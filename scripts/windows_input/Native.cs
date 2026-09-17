@@ -106,6 +106,7 @@ namespace HerdrInputGauntlet {
         [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int width, int height, uint flags);
         [DllImport("user32.dll")] public static extern int CountClipboardFormats();
         [DllImport("user32.dll")] public static extern uint GetClipboardSequenceNumber();
+        [DllImport("user32.dll")] static extern IntPtr GetClipboardOwner();
         [DllImport("user32.dll")] static extern bool OpenClipboard(IntPtr owner);
         [DllImport("user32.dll")] static extern bool CloseClipboard();
         [DllImport("user32.dll")] static extern bool EmptyClipboard();
@@ -151,7 +152,12 @@ namespace HerdrInputGauntlet {
                 memory=IntPtr.Zero; // ownership transferred to Windows
             } finally { if(memory!=IntPtr.Zero) GlobalFree(memory); CloseClipboard(); }
             // Closing can synthesize additional formats and advance the sequence.
-            return GetClipboardSequenceNumber();
+            // Reopen before adopting it so another writer cannot become our lease.
+            if(!OpenClipboard(owner)) throw new Exception("Clipboard busy; cannot establish test ownership");
+            try {
+                if(owner==IntPtr.Zero || GetClipboardOwner()!=owner) throw new Exception("Clipboard ownership changed; refusing cleanup lease");
+                return GetClipboardSequenceNumber();
+            } finally { CloseClipboard(); }
         }
         public static bool ClearOwnedClipboard(uint sequence) {
             if(!OpenClipboard(IntPtr.Zero)) return false;
@@ -302,6 +308,12 @@ namespace HerdrInputGauntlet {
             } catch(Exception e) { Error=e.Message; }
         }
         public void Clear() { lock(gate) { bytes.Clear(); records.Clear(); } }
+        public bool ClearIfCount(int expected) {
+            lock(gate) {
+                if(bytes.Count+records.Count!=expected) return false;
+                bytes.Clear(); records.Clear(); return true;
+            }
+        }
         public string Hex() { lock(gate) return BitConverter.ToString(bytes.ToArray()).Replace("-","").ToLowerInvariant(); }
         public long[][] Records() { lock(gate) return records.ToArray(); }
         public int Count() { lock(gate) return bytes.Count+records.Count; }

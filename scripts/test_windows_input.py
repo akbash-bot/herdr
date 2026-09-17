@@ -23,6 +23,14 @@ class WindowsInputGauntletTests(unittest.TestCase):
                 for value in expected.get("hex", []):
                     self.assertTrue(bytes.fromhex(value))
 
+    def test_default_catalogue_does_not_inject_terminal_host_actions(self):
+        for case_id in ["ctrl-v", "alt-enter", "ctrl-shift-up", "ctrl-shift-down", "ctrl-shift-home", "ctrl-shift-end"]:
+            self.assertEqual(self.cases[case_id]["kind"], "qualification", case_id)
+
+    def test_kitty_function_keys_accept_native_and_legacy_encodings(self):
+        self.assertEqual(self.cases["shift-tab"]["expected"]["kitty"]["hex"], ["1b5b5a", "1b5b393b3275"])
+        self.assertEqual(self.cases["up"]["expected"]["kitty"]["hex"], ["1b5b41", "1b5b353734313975"])
+
     def test_shift_enter_cannot_pass_with_plain_enter_or_trailing_duplicates(self):
         case = self.cases["shift-enter"]
         correct = "1b5b32373b323b31337e"

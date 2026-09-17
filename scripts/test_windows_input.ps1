@@ -5,7 +5,7 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][string] $ExePath,
+    [string] $ExePath,
     [string] $StablePath,
     [string] $PreviewPath,
     [ValidateSet('default', 'win32', 'vt')][string] $Profile = 'default',
@@ -33,10 +33,36 @@ if ($Widths.Count -eq 0 -or $Heights.Count -eq 0 -or @($Widths | Where-Object { 
 Add-Type -Path "$PSScriptRoot/windows_input/Native.cs"
 [HerdrInputGauntlet.Desktop]::AssertNotElevated($PID)
 [HerdrInputGauntlet.Desktop]::Neutral()
+$sourceCommit = $null
+$sourceDirty = $null
+if (-not $ExePath) {
+    $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+    $sourceCommit = (& git -C $repo rev-parse HEAD).Trim()
+    if ($LASTEXITCODE -ne 0) { throw 'Could not identify the source checkout commit' }
+    $sourceDirty = [bool](& git -C $repo status --porcelain)
+    Write-Host "Building current checkout: $repo"
+    & cargo build --release --locked --manifest-path (Join-Path $repo 'Cargo.toml')
+    if ($LASTEXITCODE -ne 0) { throw "cargo build failed with exit code $LASTEXITCODE" }
+    $targetRoot = if ($env:CARGO_TARGET_DIR) { [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR, $repo) } else { Join-Path $repo 'target' }
+    $builtExe = Join-Path $targetRoot 'release/herdr.exe'
+    $package = Join-Path $repo '.local/windows-input/cache/Microsoft.Windows.Console.ConPTY.nupkg'
+    $stage = Join-Path $root 'package'
+    Write-Host 'Staging the current binary with the pinned ConPTY runtime'
+    $null = Invoke-GauntletProcess $python @((Join-Path $PSScriptRoot 'package_windows_conpty.py'), 'stage', '--package', $package, '--herdr-exe', $builtExe, '--output-dir', $stage) -Timeout 300
+    $ExePath = Join-Path $stage 'herdr.exe'
+}
 $exe = (Resolve-Path -LiteralPath $ExePath).Path
+$conpty = Join-Path ([IO.Path]::GetDirectoryName($exe)) 'conpty/conpty.dll'
+if (-not (Test-Path -LiteralPath $conpty -PathType Leaf)) { throw "Selected Herdr binary has no adjacent bundled ConPTY runtime: $exe. Pass -ExePath to a packaged herdr.exe" }
 $pwsh = (Get-Process -Id $PID).Path
+$exeHash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
+if ($sourceCommit) { Write-Host "Source: $sourceCommit$(if ($sourceDirty) { ' + working tree changes' })" }
+Write-Host "Herdr under test: $exe"
+Write-Host "SHA-256: $exeHash"
+Write-Host "Modes: $($Modes -join ', '); widths: $($Widths -join ', '); heights: $($Heights -join ', ')"
+Write-Host "Clipboard formats at start: $([HerdrInputGauntlet.Desktop]::CountClipboardFormats()) (paste runs only when zero)"
 $document = @{ schema = 1; run = [IO.Path]::GetFileName($root); started = [DateTime]::UtcNow.ToString('O');
-    exe = $exe; exe_sha256 = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash;
+    source_commit = $sourceCommit; source_dirty = $sourceDirty; exe = $exe; exe_sha256 = $exeHash;
     powershell = $PSVersionTable.PSVersion.ToString(); os = [Environment]::OSVersion.VersionString;
     profile = $Profile; controller_elevated = $false; observations = @(); hosts = @(); errors = @(); cleanup_errors = @();
     widths = $Widths; heights = $Heights; modes = $Modes; note = 'Desktop input evidence; native qualification still required' }
@@ -87,6 +113,11 @@ function New-Observation($HostName, $Plan, $Width, $Height, $Case) {
 try {
     [HerdrInputGauntlet.Desktop]::StartEmergencyStop()
     $terminals = @{ stable = (Resolve-Terminal 'stable' $StablePath); preview = (Resolve-Terminal 'preview' $PreviewPath) }
+    foreach ($channel in @('stable', 'preview')) {
+        $terminal = $terminals[$channel]
+        if ($terminal) { Write-Host "Windows Terminal $channel`: $($terminal.path) ($((Get-Item $terminal.path).VersionInfo.FileVersion))" }
+        else { Write-Host "Windows Terminal $channel`: not installed (channel will be not_run)" }
+    }
     $launcherIdentities = @{}; $installationIdentities = @{}
     foreach ($channel in @('stable', 'preview')) {
         if ($terminals[$channel]) {
