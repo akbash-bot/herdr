@@ -10,8 +10,10 @@ Herdr client. It does not substitute `pane send-keys` for host input.
 Use an **unlocked, isolated interactive desktop** where you will not do other
 work during automated input. The runner changes foreground focus and window
 size. `SendInput` has an unavoidable check-to-use focus race; a foreground check
-is not an OS security boundary. Do not run this against an administrator window
-or in a shared working desktop. There is no unattended CI job or runner permission
+is not an OS security boundary. The runner rejects an elevated controller and
+checks the target Terminal process token before focus, resize, and injection.
+An elevation-query failure is also a refusal, not permission to proceed. Start
+PowerShell and Terminal **without Run as administrator**, on a dedicated desktop. There is no unattended CI job or runner permission
 change in this implementation.
 
 Required: Windows, installed PowerShell **7** (`pwsh`), Python 3, and an existing
@@ -19,7 +21,11 @@ Herdr Windows executable with its adjacent bundled ConPTY directory. Stable and
 Preview Windows Terminal are discovered independently through their installed
 packages. Explicit paths are available when discovery does not work. No software
 is installed or updated. The actual Terminal process path/version is recorded,
-not inferred from the requested channel or bundled OpenConsole version.
+not inferred from the requested channel or bundled OpenConsole version. Stable
+and Preview must resolve to distinct installations: the runner compares Windows
+file/directory identities before launch, then checks actual image, installation,
+and PID/start-time identities after activation. Aliases cannot count one install
+twice. The portable report validator rejects duplicate identities too.
 
 **F12** aborts before the next automatic gesture. Moving focus away also aborts
 further automatic input. Each injected chord contains its own releases; there
@@ -118,9 +124,17 @@ The retained directory contains:
   modes, and bootstrap/probe error records.
 
 Direct-host and through-Herdr observations are labelled separately. A direct-host
-failure is **not automatically a Herdr bug**. For example, a terminal may intercept
-Alt+Enter or use a different control-key encoding. Review captures before changing
-an expectation; never bless lost Shift information just to make a report green.
+failure is **not automatically a Herdr bug**. Each row labels its failure scope as
+`direct_host` or `through_herdr_not_yet_attributed`. For example, a terminal may
+intercept Alt+Enter or use a different control-key encoding.
+
+One explicit known-gap rule labels a nonce-bound, complete **WT 1.24 direct-host
+mOK Shift+Enter capture containing exactly CR (`0d`)** as `unsupported`. It does
+not exempt all tests on that version, an empty/malformed capture, Kitty, or any
+through-Herdr failure. Through-Herdr still must preserve the requested gesture.
+Unsupported remains incomplete coverage, not green. Review captures before
+adding other capability exceptions; never bless lost Shift information in Herdr
+just to make a report green.
 
 Comparisons consume the **complete captured sequence**, including a quiet interval
 to catch trailing duplicates/releases. Paste must have one intact bracketed

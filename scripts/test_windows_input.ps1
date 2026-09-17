@@ -31,13 +31,14 @@ if (-not $AllowInputInjection) { throw 'Read scripts/windows_input/README.md, th
 if (-not [Environment]::UserInteractive) { throw 'Interactive desktop unavailable' }
 if ($Widths.Count -eq 0 -or $Heights.Count -eq 0 -or @($Widths | Where-Object { $_ -lt 40 -or $_ -gt 500 }).Count -or @($Heights | Where-Object { $_ -lt 15 -or $_ -gt 150 }).Count) { throw 'Invalid geometry selection' }
 Add-Type -Path "$PSScriptRoot/windows_input/Native.cs"
+[HerdrInputGauntlet.Desktop]::AssertNotElevated($PID)
 [HerdrInputGauntlet.Desktop]::Neutral()
 $exe = (Resolve-Path -LiteralPath $ExePath).Path
 $pwsh = (Get-Process -Id $PID).Path
 $document = @{ schema = 1; run = [IO.Path]::GetFileName($root); started = [DateTime]::UtcNow.ToString('O');
     exe = $exe; exe_sha256 = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash;
     powershell = $PSVersionTable.PSVersion.ToString(); os = [Environment]::OSVersion.VersionString;
-    profile = $Profile; observations = @(); hosts = @(); errors = @(); cleanup_errors = @();
+    profile = $Profile; controller_elevated = $false; observations = @(); hosts = @(); errors = @(); cleanup_errors = @();
     widths = $Widths; heights = $Heights; modes = $Modes; note = 'Desktop input evidence; native qualification still required' }
 $rawReport = Join-Path $root 'observations.json'
 $artifactReport = Join-Path $root 'report.json'
@@ -85,14 +86,26 @@ function New-Observation($HostName, $Plan, $Width, $Height, $Case) {
 
 try {
     [HerdrInputGauntlet.Desktop]::StartEmergencyStop()
+    $terminals = @{ stable = (Resolve-Terminal 'stable' $StablePath); preview = (Resolve-Terminal 'preview' $PreviewPath) }
+    $launcherIdentities = @{}; $installationIdentities = @{}
+    foreach ($channel in @('stable', 'preview')) {
+        if ($terminals[$channel]) {
+            $launcherIdentities[$channel] = [HerdrInputGauntlet.Desktop]::FileIdentity($terminals[$channel])
+            $installationIdentities[$channel] = [HerdrInputGauntlet.Desktop]::FileIdentity([IO.Path]::GetDirectoryName($terminals[$channel]))
+        }
+    }
+    if ($terminals.stable -and $terminals.preview -and ($launcherIdentities.stable -eq $launcherIdentities.preview -or $installationIdentities.stable -eq $installationIdentities.preview)) {
+        throw 'Stable and Preview resolve to the same executable/installation; refusing duplicate channel evidence'
+    }
     foreach ($hostName in @('stable', 'preview')) {
-        $terminal = Resolve-Terminal $hostName $(if ($hostName -eq 'stable') { $StablePath } else { $PreviewPath })
+        $terminal = $terminals[$hostName]
         if (-not $terminal) {
             $document.hosts += @{ channel = $hostName; status = 'not_run'; reason = 'Terminal installation not found; supply explicit path' }
             Save-Report
             continue
         }
-        $hostRecord = @{ channel = $hostName; launcher = $terminal; launcher_version = (Get-Item $terminal).VersionInfo.FileVersion; runs = @() }
+        $hostRecord = @{ channel = $hostName; launcher = $terminal; launcher_version = (Get-Item $terminal).VersionInfo.FileVersion;
+            launcher_identity = $launcherIdentities[$hostName]; installation_identity = $installationIdentities[$hostName]; runs = @() }
         $document.hosts += $hostRecord
         foreach ($path in @('direct', 'herdr')) { foreach ($mode in $Modes) {
             $nonce = 'herdr-gauntlet-' + [guid]::NewGuid().ToString('N')
@@ -105,7 +118,7 @@ try {
                 path = $path; mode = $mode; profile = $Profile; exe = $exe; pwsh = $pwsh }
             $planPath = Join-Path $work 'plan.json'
             Write-GauntletJson $planPath $plan
-            $window = [IntPtr]::Zero; $windowPid = 0; $server = $null; $launcher = $null; $clipboardSequence = $null
+            $window = [IntPtr]::Zero; $windowPid = 0; $server = $null; $launcher = $null; $clipboardSequence = $null; $injectionAuthorized = $false
             Update-GauntletLease $root
             try {
                 if ($path -eq 'herdr') {
@@ -139,12 +152,27 @@ try {
                 $windowPid = [HerdrInputGauntlet.Desktop]::Pid($window)
                 $windowProcess = Get-Process -Id $windowPid
                 if ($windowProcess.ProcessName -ne 'WindowsTerminal') { throw 'Nonce window is not Windows Terminal; refusing injection' }
+                [HerdrInputGauntlet.Desktop]::AssertNotElevated($windowPid)
+                $imageIdentity = [HerdrInputGauntlet.Desktop]::FileIdentity($windowProcess.Path)
+                $installationIdentity = [HerdrInputGauntlet.Desktop]::FileIdentity([IO.Path]::GetDirectoryName($windowProcess.Path))
+                $processIdentity = "$windowPid/$($windowProcess.StartTime.ToUniversalTime().Ticks)"
+                foreach ($otherHost in $document.hosts) {
+                    if ($otherHost.channel -ne $hostName -and $otherHost.ContainsKey('runs')) {
+                        foreach ($other in $otherHost.runs) {
+                            if ($other.image_identity -eq $imageIdentity -or $other.installation_identity -eq $installationIdentity -or $other.process_identity -eq $processIdentity) {
+                                throw 'Stable and Preview activated the same Terminal installation/process; refusing duplicate evidence'
+                            }
+                        }
+                    }
+                }
                 $runRecord = @{ nonce = $nonce; path = $path; mode = $mode; hwnd = $window.ToInt64(); pid = $windowPid;
                     terminal_path = $windowProcess.Path; terminal_version = $windowProcess.MainModule.FileVersionInfo.FileVersion;
+                    elevated = $false; image_identity = $imageIdentity; installation_identity = $installationIdentity; process_identity = $processIdentity;
                     layout = [HerdrInputGauntlet.Desktop]::Layout($window) }
                 $hostRecord.runs += $runRecord
                 $ready = Wait-GauntletJson (Join-Path $work 'ready.json') $root { param($v) $v.nonce -eq $nonce -and $v.mode -eq $mode }
                 [HerdrInputGauntlet.Desktop]::Focus($window, $nonce, $windowPid)
+                $injectionAuthorized = $true
                 Start-Sleep -Milliseconds 500
                 # Full case catalogue once; boundary geometries run discriminating sentinels.
                 $geometries = @(@{ width = 120; height = 30; full = $true })
@@ -222,7 +250,7 @@ try {
                     } catch { $document.cleanup_errors += $_.Exception.Message }
                 }
                 # Normal detach only while still owning foreground focus; never type into another window.
-                if ($path -eq 'herdr' -and [HerdrInputGauntlet.Desktop]::IsOwned($window, $nonce, $windowPid) -and [HerdrInputGauntlet.Desktop]::GetForegroundWindow() -eq $window) {
+                if ($injectionAuthorized -and $path -eq 'herdr' -and [HerdrInputGauntlet.Desktop]::IsOwned($window, $nonce, $windowPid) -and [HerdrInputGauntlet.Desktop]::GetForegroundWindow() -eq $window) {
                     try {
                         $null = [HerdrInputGauntlet.Desktop]::Chord($window, $nonce, $windowPid, [int[]]@(17, 66))
                         Start-Sleep -Milliseconds 100
@@ -242,7 +270,11 @@ try {
                     if (-not $server.HasExited) {
                         try { $null = Invoke-GauntletProcess $exe @('session', 'stop', $nonce) $plan } catch { $document.cleanup_errors += $_.Exception.Message }
                     }
-                    if (-not $server.WaitForExit(5000)) { $server.Kill($true); $document.cleanup_errors += "$nonce server required forced cleanup" }
+                    if (-not $server.WaitForExit(5000)) {
+                        $server.Kill($true)
+                        $document.cleanup_errors += "$nonce server required forced cleanup"
+                        if (-not $server.WaitForExit(5000)) { $document.cleanup_errors += "$nonce server remained active after forced cleanup" }
+                    }
                     if (-not (Test-Path (Join-Path $work 'bootstrap-exit.json'))) {
                         try { $null = Invoke-GauntletProcess $exe @('session', 'delete', $nonce) $plan } catch { $document.cleanup_errors += $_.Exception.Message }
                     }

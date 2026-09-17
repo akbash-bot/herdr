@@ -1,7 +1,7 @@
 """Portable tests of the gauntlet's oracle, not Windows input qualification."""
 import copy
 import unittest
-from scripts.windows_input.report import catalogue, summarize, verdict
+from scripts.windows_input.report import catalogue, channel_identity_errors, summarize, verdict
 
 
 class WindowsInputGauntletTests(unittest.TestCase):
@@ -72,18 +72,61 @@ class WindowsInputGauntletTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Duplicate"):
             summarize({"observations": [row, row]})
         later = {**row, "phase": 2, "width": 80, "height": 24, "outer_geometry": [80, 24], "final_outer_geometry": [80, 24]}
-        host = {"channel": "stable", "runs": [{"nonce": "owned", "path": "herdr", "mode": "legacy", "pid": 123, "hwnd": 456}]}
+        host = {"channel": "stable", "runs": [{"nonce": "owned", "path": "herdr", "mode": "legacy", "pid": 123, "hwnd": 456,
+                                                "elevated": False, "image_identity": "image-s", "installation_identity": "install-s"}]}
         row.update(nonce="owned", capture_id="first")
         later.update(nonce="owned", capture_id="second")
-        self.assertEqual(summarize({"observations": [row, later], "hosts": [host]})["counts"]["pass"], 2)
+        self.assertEqual(summarize({"observations": [row, later], "hosts": [host], "controller_elevated": False})["counts"]["pass"], 2)
         stale = {**later, "capture_id": "first"}
-        self.assertEqual(summarize({"observations": [row, stale], "hosts": [host]})["counts"]["inconclusive"], 1)
+        self.assertEqual(summarize({"observations": [row, stale], "hosts": [host], "controller_elevated": False})["counts"]["inconclusive"], 1)
         forged_hosts = [{"channel": name, "runs": [{}]} for name in ("stable", "preview")]
         partial = summarize({"observations": [row], "hosts": forged_hosts})
         self.assertFalse(partial["observed_checks_passed"])
         self.assertGreater(partial["coverage_missing"], 0)
         for status in ["unsupported", "not_run", "inconclusive"]:
             self.assertEqual(verdict(self.cases["letter-a"], "legacy", {**row, "status": status})[0], status)
+
+    def test_malformed_native_records_are_inconclusive_not_exceptions(self):
+        evidence = {**self.evidence, "scans": [30]}
+        for records in [None, 7, "records", [None], [[1, 1, 1, 65, 30, 97, None]],
+                        [[True, 1, 1, 65, 30, 97, 0]], [[1, 1, 1, 65, 30, 97, "0"]]]:
+            self.assertEqual(verdict(self.cases["letter-a"], "native", {**evidence, "records": records})[0], "inconclusive")
+
+    def test_known_host_gap_does_not_exempt_herdr_or_other_versions(self):
+        row = {**self.evidence, "case": "shift-enter", "host": "stable", "path": "direct", "mode": "mok2", "hex": "0d", "phase": 1,
+               "width": 120, "height": 30, "outer_geometry": [120, 30], "final_outer_geometry": [120, 30],
+               "nonce": "owned", "capture_id": "fresh"}
+        for path, version, raw, expected in [("direct", "1.24.11911.0", "0d", "unsupported"),
+                                             ("herdr", "1.24.11911.0", "0d", "fail"),
+                                             ("direct", "1.25.0.0", "0d", "fail"),
+                                             ("direct", "1.24.11911.0", "", "fail")]:
+            observation = {**row, "path": path, "hex": raw}
+            run = {"nonce": "owned", "path": path, "mode": "mok2", "pid": 123, "hwnd": 456, "terminal_version": version,
+                   "elevated": False, "image_identity": "image-s", "installation_identity": "install-s"}
+            document = {"observations": [observation], "hosts": [{"channel": "stable", "runs": [run]}], "controller_elevated": False}
+            result = summarize(document)["observations"][0]
+            self.assertEqual(result["status"], expected)
+            self.assertEqual(result["failure_scope"], "direct_host" if path == "direct" else "through_herdr_not_yet_attributed")
+            document["controller_elevated"] = True
+            self.assertEqual(summarize(document)["observations"][0]["status"], "inconclusive")
+            document["controller_elevated"] = False
+            run["elevated"] = True
+            self.assertEqual(summarize(document)["observations"][0]["status"], "inconclusive")
+
+    def test_duplicate_channel_identity_is_rejected_at_both_stages(self):
+        hosts = [{"channel": name, "launcher_identity": name + "-exe", "installation_identity": name + "-dir",
+                  "runs": [{"image_identity": name + "-image", "installation_identity": name + "-dir", "process_identity": name + "-pid/start"}]}
+                 for name in ("stable", "preview")]
+        self.assertEqual(channel_identity_errors(hosts), [])
+        for field in ("launcher_identity", "installation_identity"):
+            duplicate = copy.deepcopy(hosts)
+            duplicate[1][field] = duplicate[0][field]
+            self.assertTrue(channel_identity_errors(duplicate))
+            self.assertTrue(summarize({"hosts": duplicate})["errors"])
+        for field in ("image_identity", "installation_identity", "process_identity"):
+            duplicate = copy.deepcopy(hosts)
+            duplicate[1]["runs"][0][field] = duplicate[0]["runs"][0][field]
+            self.assertTrue(channel_identity_errors(duplicate))
 
 
 if __name__ == "__main__":

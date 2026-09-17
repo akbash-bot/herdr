@@ -4,6 +4,7 @@ This is not a host simulator. A report cannot turn absent Windows evidence into 
 """
 import argparse
 import json
+import re
 from pathlib import Path
 
 WIDTHS = [80, 119, 120, 121, 132, 160, 240]
@@ -115,17 +116,19 @@ def verdict(case, mode, evidence):
     if evidence.get("final_outer_geometry", [])[:2] != evidence["outer_geometry"][:2]:
         return "inconclusive", "Outer geometry changed during capture"
     if "vk" in expected:
-        records = evidence.get("records", [])
+        records = evidence.get("records")
         scans = evidence.get("scans", [])
         chord = case["chords"][0]
-        if len(scans) != len(chord):
+        if not isinstance(records, list):
+            return "inconclusive", "Malformed native record"
+        if not isinstance(scans, list) or len(scans) != len(chord) or not all(type(scan) is int for scan in scans):
             return "inconclusive", "Missing injected scan-code evidence"
         expected_scans = dict(zip(chord, scans))
         aliases = {160: 16, 161: 16, 162: 17, 163: 17, 164: 18, 165: 18}
         held = set()
         keys = []
         for record in records:
-            if len(record) != 7:
+            if not isinstance(record, list) or len(record) != 7 or not all(type(field) is int for field in record):
                 return "inconclusive", "Malformed native record"
             if record[0] in (4, 16):  # Resize/focus notifications carry no typed text.
                 continue
@@ -171,6 +174,30 @@ def verdict(case, mode, evidence):
     return ("pass", "One complete paste matches") if normalize(actual) == normalize(expected["paste"]) else ("fail", "Paste payload differs")
 
 
+def known_host_gap(observation, run):
+    """A narrowly observed host limitation, never a blanket version exemption."""
+    value = run.get("terminal_version", "")
+    version = re.match(r"^1\.24(?:\.|$)", value) if isinstance(value, str) else None
+    return (version is not None and observation.get("path") == "direct"
+            and observation.get("mode") == "mok2" and observation.get("case") == "shift-enter"
+            and observation.get("hex") == "0d")
+
+
+def channel_identity_errors(hosts):
+    """Compare both launcher identities and the processes actually activated."""
+    identities = {}
+    for host in hosts:
+        values = identities.setdefault(host.get("channel"), set())
+        for field, kind in (("launcher_identity", "file"), ("installation_identity", "installation")):
+            if host.get(field):
+                values.add((kind, host[field]))
+        for run in host.get("runs", []):
+            for field, kind in (("image_identity", "file"), ("installation_identity", "installation"), ("process_identity", "process")):
+                if run.get(field):
+                    values.add((kind, run[field]))
+    return ["Stable and Preview share a Terminal executable, installation, or process identity"] if identities.get("stable", set()) & identities.get("preview", set()) else []
+
+
 def summarize(document):
     matrix = catalogue()
     cases = {case["id"]: case for case in matrix["cases"]}
@@ -184,17 +211,21 @@ def summarize(document):
         seen.add(identity)
         case = cases[observation["case"]]
         status, reason = verdict(case, observation["mode"], observation)
-        if status == "pass":
-            bound = any(host.get("channel") == observation.get("host") and any(
-                run.get("nonce") == observation.get("nonce") and run.get("path") == observation.get("path")
-                and run.get("mode") == observation.get("mode") and run.get("pid", 0) > 0 and run.get("hwnd", 0) != 0
-                for run in host.get("runs", [])) for host in document.get("hosts", []))
+        scope = "direct_host" if observation.get("path") == "direct" else "through_herdr_not_yet_attributed"
+        if status in ("pass", "fail"):
+            bound = [run for host in document.get("hosts", []) if host.get("channel") == observation.get("host")
+                     for run in host.get("runs", [])
+                     if run.get("nonce") == observation.get("nonce") and run.get("path") == observation.get("path")
+                     and run.get("mode") == observation.get("mode") and run.get("pid", 0) > 0 and run.get("hwnd", 0) != 0
+                     and run.get("elevated") is False and run.get("image_identity") and run.get("installation_identity")]
             capture = observation.get("capture_id")
-            if not bound or not capture or capture in captures:
-                status, reason = "inconclusive", "Missing owned-run binding or fresh capture identity"
+            if len(bound) != 1 or document.get("controller_elevated") is not False or not capture or capture in captures:
+                status, reason = "inconclusive", "Missing non-elevated owned-run binding or fresh capture identity"
             else:
                 captures.add(capture)
-        rows.append({**observation, "status": status, "reason": reason})
+                if status == "fail" and known_host_gap(observation, bound[0]):
+                    status, reason = "unsupported", "Observed WT 1.24 direct-host mOK Shift+Enter→CR limitation; not a Herdr regression"
+        rows.append({**observation, "status": status, "reason": reason, "failure_scope": scope})
     counts = {status: sum(r["status"] == status for r in rows) for status in ("pass", "fail", "not_run", "unsupported", "inconclusive")}
     # No run may claim all-green just because it produced zero/missing observations.
     planned = set()
@@ -209,11 +240,12 @@ def summarize(document):
     if seen - planned:
         raise ValueError("Observations outside the declared run matrix")
     hosts = document.get("hosts", [])
+    errors = list(document.get("errors", [])) + channel_identity_errors(hosts)
     complete = (bool(rows) and not missing and {h.get("channel") for h in hosts} == {"stable", "preview"}
                 and all(h.get("runs") for h in hosts)
-                and not document.get("errors") and not document.get("cleanup_errors")
+                and not errors and not document.get("cleanup_errors")
                 and all(r["status"] == "pass" for r in rows))
-    return {**document, "observations": rows, "counts": counts, "coverage_missing": len(missing), "observed_checks_passed": complete,
+    return {**document, "errors": errors, "observations": rows, "counts": counts, "coverage_missing": len(missing), "observed_checks_passed": complete,
             "native_qualification": "Required; this report is not a full Windows support certificate"}
 
 

@@ -55,6 +55,34 @@ namespace HerdrInputGauntlet {
         public static void StopEmergencyStop() {
             if(stopThread!=null) { PostThreadMessage(stopThreadId,0x12,UIntPtr.Zero,IntPtr.Zero); stopThread.Join(1000); }
         }
+        [DllImport("kernel32.dll",SetLastError=true)] static extern IntPtr OpenProcess(uint access,bool inherit,int pid);
+        [DllImport("advapi32.dll",SetLastError=true)] static extern bool OpenProcessToken(IntPtr process,uint access,out IntPtr token);
+        [DllImport("advapi32.dll",SetLastError=true)] static extern bool GetTokenInformation(IntPtr token,int kind,out uint value,int size,out int returned);
+        [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+        [StructLayout(LayoutKind.Sequential)] struct FileInformation {
+            public uint Attributes,CreationLow,CreationHigh,AccessLow,AccessHigh,WriteLow,WriteHigh;
+            public uint Volume,SizeHigh,SizeLow,Links,IndexHigh,IndexLow;
+        }
+        [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFile(string path,uint access,uint share,IntPtr security,uint creation,uint flags,IntPtr template);
+        [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetFileInformationByHandle(Microsoft.Win32.SafeHandles.SafeFileHandle file,out FileInformation info);
+        public static string FileIdentity(string path) {
+            using(var file=CreateFile(path,0,7,IntPtr.Zero,3,0x02000000,IntPtr.Zero)) {
+                FileInformation info;
+                if(file.IsInvalid || !GetFileInformationByHandle(file,out info)) throw new Win32Exception(Marshal.GetLastWin32Error(),"Cannot establish Terminal file/installation identity");
+                return info.Volume.ToString("x8")+":"+info.IndexHigh.ToString("x8")+info.IndexLow.ToString("x8");
+            }
+        }
+        public static void AssertNotElevated(int pid) {
+            var process=OpenProcess(0x1000,false,pid);
+            if(process==IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error(),"Cannot verify process elevation; refusing desktop input");
+            IntPtr token=IntPtr.Zero;
+            try {
+                uint elevated; int returned;
+                if(!OpenProcessToken(process,8,out token) || !GetTokenInformation(token,20,out elevated,4,out returned) || returned!=4)
+                    throw new Win32Exception(Marshal.GetLastWin32Error(),"Cannot verify process elevation; refusing desktop input");
+                if(elevated!=0) throw new Exception("Elevated controller/Terminal is not allowed. Start PowerShell and Terminal without Run as administrator.");
+            } finally { if(token!=IntPtr.Zero) CloseHandle(token); CloseHandle(process); }
+        }
         [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc callback, IntPtr arg);
         [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetWindowText(IntPtr hwnd, StringBuilder value, int count);
         [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
@@ -111,10 +139,12 @@ namespace HerdrInputGauntlet {
         public static bool IsOwned(IntPtr hwnd, string nonce, int pid) { return hwnd!=IntPtr.Zero && Pid(hwnd)==pid && Title(hwnd).Contains(nonce); }
         public static void Guard(IntPtr hwnd, string nonce, int pid) {
             if(!IsOwned(hwnd,nonce,pid) || GetForegroundWindow()!=hwnd) throw new Exception("Lost owned test-window focus; injection aborted");
+            AssertNotElevated(pid);
             if(stopped || (GetAsyncKeyState(0x7B)&0x8000)!=0) throw new Exception("F12 emergency stop");
         }
         public static void Focus(IntPtr hwnd, string nonce, int pid) {
             if(!IsOwned(hwnd,nonce,pid)) throw new Exception("Lost window ownership");
+            AssertNotElevated(pid);
             if(!SetForegroundWindow(hwnd) && GetForegroundWindow()!=hwnd) throw new Exception("Cannot focus test window; no input sent");
         }
         public static void Neutral() {
@@ -146,7 +176,10 @@ namespace HerdrInputGauntlet {
                 var held=new List<Input>();
                 for(int i=0;i<keys.Length && i<sent;i++)
                     if(sent <= 2*keys.Length-1-i) held.Add(Event((ushort)keys[i],true,layout));
-                if(held.Count>0) SendInput((uint)held.Count,held.ToArray(),Marshal.SizeOf<Input>());
+                if(held.Count>0) {
+                    uint released=SendInput((uint)held.Count,held.ToArray(),Marshal.SizeOf<Input>());
+                    if(released!=held.Count) throw new Exception("SendInput cleanup incomplete: "+released+"/"+held.Count+" key-up events; release test modifiers manually before continuing");
+                }
                 throw new Exception("SendInput incomplete (possible UIPI restriction): "+sent+"/"+events.Count);
             }
             return (int)sent;
