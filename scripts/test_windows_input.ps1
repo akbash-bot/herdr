@@ -1,0 +1,262 @@
+#Requires -Version 7.0
+<# Local interactive qualification, deliberately excluded from normal CI.
+   F12 aborts before the next injected gesture. Use an isolated unlocked desktop.
+   SendInput has an unavoidable focus race: do not use this while doing other work.
+#>
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory)][string] $ExePath,
+    [string] $StablePath,
+    [string] $PreviewPath,
+    [ValidateSet('default', 'win32', 'vt')][string] $Profile = 'default',
+    [ValidateSet('native', 'legacy', 'mok2', 'kitty')][string[]] $Modes = @('native', 'legacy', 'mok2', 'kitty'),
+    [int[]] $Widths = @(80, 119, 120, 121, 132, 160, 240),
+    [int[]] $Heights = @(24, 50),
+    [string] $OutputDirectory,
+    [switch] $AllowInputInjection,
+    [switch] $Manual,
+    [switch] $MatrixOnly
+)
+. "$PSScriptRoot/windows_input/Common.ps1"
+$reportScript = Join-Path $PSScriptRoot 'windows_input/report.py'
+$python = (Get-Command python -ErrorAction Stop).Source
+if (-not $OutputDirectory) { $OutputDirectory = Join-Path $PWD ".local/windows-input/$([guid]::NewGuid().ToString('N'))" }
+if (Test-Path -LiteralPath $OutputDirectory) { throw 'Output directory must be new, to prevent stale evidence or overwrites' }
+$root = [IO.Directory]::CreateDirectory($OutputDirectory).FullName
+$null = Invoke-GauntletProcess $python @($reportScript, 'matrix', '--output', (Join-Path $root 'matrix.json'))
+$matrix = Read-GauntletJson (Join-Path $root 'matrix.json')
+if ($MatrixOnly) { Write-Host "Matrix: $root/matrix.json"; exit 0 }
+if (-not $IsWindows) { throw 'Real-host qualification requires Windows and an interactive desktop; no tests passed' }
+if (-not $AllowInputInjection) { throw 'Read scripts/windows_input/README.md, then explicitly pass -AllowInputInjection on an isolated desktop' }
+if (-not [Environment]::UserInteractive) { throw 'Interactive desktop unavailable' }
+if ($Widths.Count -eq 0 -or $Heights.Count -eq 0 -or @($Widths | Where-Object { $_ -lt 40 -or $_ -gt 500 }).Count -or @($Heights | Where-Object { $_ -lt 15 -or $_ -gt 150 }).Count) { throw 'Invalid geometry selection' }
+Add-Type -Path "$PSScriptRoot/windows_input/Native.cs"
+[HerdrInputGauntlet.Desktop]::Neutral()
+$exe = (Resolve-Path -LiteralPath $ExePath).Path
+$pwsh = (Get-Process -Id $PID).Path
+$document = @{ schema = 1; run = [IO.Path]::GetFileName($root); started = [DateTime]::UtcNow.ToString('O');
+    exe = $exe; exe_sha256 = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash;
+    powershell = $PSVersionTable.PSVersion.ToString(); os = [Environment]::OSVersion.VersionString;
+    profile = $Profile; observations = @(); hosts = @(); errors = @(); cleanup_errors = @();
+    widths = $Widths; heights = $Heights; modes = $Modes; note = 'Desktop input evidence; native qualification still required' }
+$rawReport = Join-Path $root 'observations.json'
+$artifactReport = Join-Path $root 'report.json'
+
+function Save-Report { Write-GauntletJson $rawReport $document }
+function Resolve-Terminal($Name, $Override) {
+    if ($Override) { return (Resolve-Path -LiteralPath $Override).Path }
+    $packageName = if ($Name -eq 'stable') { 'Microsoft.WindowsTerminal' } else { 'Microsoft.WindowsTerminalPreview' }
+    $package = @(Get-AppxPackage -Name $packageName -ErrorAction SilentlyContinue | Sort-Object Version -Descending)
+    if ($package.Count -eq 0) { return $null }
+    $path = Join-Path $package[0].InstallLocation 'WindowsTerminal.exe'
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    return $path
+}
+function Observer-Request($Plan, $Action) {
+    $id = [guid]::NewGuid().ToString('N')
+    Write-GauntletJson (Join-Path $Plan.work 'request.json') @{ id = $id; nonce = $Plan.nonce; action = $Action }
+    $reply = Wait-GauntletJson (Join-Path $Plan.work 'reply.json') $root { param($v) $v.id -eq $id -and $v.nonce -eq $Plan.nonce -and $v.action -eq $Action }
+    if ($reply.error) { throw "Observer failed: $($reply.error)" }
+    return $reply
+}
+function Outer-State($Plan) {
+    $after = if ($Plan.ContainsKey('outer_sequence')) { $Plan.outer_sequence } else { 0 }
+    $state = Wait-GauntletJson (Join-Path $Plan.work 'outer.json') $root { param($v) $v.nonce -eq $Plan.nonce -and $v.sequence -gt $after }
+    $Plan.outer_sequence = $state.sequence
+    return $state
+}
+function Set-ObservedGeometry($Plan, $Window, $WindowPid, $Width, $Height) {
+    # Correct against actual console cell measurements, not a claimed pixel size.
+    for ($attempt = 0; $attempt -lt 8; $attempt++) {
+        [HerdrInputGauntlet.Desktop]::Guard($Window, $Plan.nonce, $WindowPid)
+        $outer = Outer-State $Plan
+        $w = [int]$outer.geometry[0]; $h = [int]$outer.geometry[1]
+        if ($w -eq $Width -and $h -eq $Height) { return $outer }
+        [HerdrInputGauntlet.Desktop]::Resize($Window, $Plan.nonce, $WindowPid, ($Width - $w) * 8, ($Height - $h) * 16)
+        Start-Sleep -Milliseconds 350
+        Update-GauntletLease $root
+    }
+    return $null
+}
+function New-Observation($HostName, $Plan, $Width, $Height, $Case) {
+    return @{ host = $HostName; path = $Plan.path; mode = $Plan.mode; width = $Width; height = $Height; case = $Case.id;
+        nonce = $Plan.nonce; status = 'inconclusive'; ready = $false; focus_verified = $false; complete = $false }
+}
+
+try {
+    [HerdrInputGauntlet.Desktop]::StartEmergencyStop()
+    foreach ($hostName in @('stable', 'preview')) {
+        $terminal = Resolve-Terminal $hostName $(if ($hostName -eq 'stable') { $StablePath } else { $PreviewPath })
+        if (-not $terminal) {
+            $document.hosts += @{ channel = $hostName; status = 'not_run'; reason = 'Terminal installation not found; supply explicit path' }
+            Save-Report
+            continue
+        }
+        $hostRecord = @{ channel = $hostName; launcher = $terminal; launcher_version = (Get-Item $terminal).VersionInfo.FileVersion; runs = @() }
+        $document.hosts += $hostRecord
+        foreach ($path in @('direct', 'herdr')) { foreach ($mode in $Modes) {
+            $nonce = 'herdr-gauntlet-' + [guid]::NewGuid().ToString('N')
+            $work = [IO.Directory]::CreateDirectory((Join-Path $root $nonce)).FullName
+            $configHome = [IO.Directory]::CreateDirectory((Join-Path $work 'config')).FullName
+            $config = Join-Path $configHome 'test.toml'
+            $shellToml = $pwsh | ConvertTo-Json -Compress
+            [IO.File]::WriteAllText($config, "onboarding = false`n[terminal]`ndefault_shell = $shellToml`n[ui]`nmouse_capture = true`n")
+            $plan = @{ root = $root; work = $work; nonce = $nonce; session = $nonce; config = $config; config_home = $configHome;
+                path = $path; mode = $mode; profile = $Profile; exe = $exe; pwsh = $pwsh }
+            $planPath = Join-Path $work 'plan.json'
+            Write-GauntletJson $planPath $plan
+            $window = [IntPtr]::Zero; $windowPid = 0; $server = $null; $launcher = $null; $clipboardSequence = $null
+            Update-GauntletLease $root
+            try {
+                if ($path -eq 'herdr') {
+                    $server = New-GauntletProcess $exe @('--session', $nonce, 'server') $plan -Capture
+                    # Drain pipes asynchronously; server output must never block readiness.
+                    $serverOut = $server.StandardOutput.ReadToEndAsync(); $serverErr = $server.StandardError.ReadToEndAsync()
+                    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+                    do {
+                        Update-GauntletLease $root
+                        try { $status = Invoke-GauntletProcess $exe @('--session', $nonce, 'status', 'server') $plan -Timeout 5 } catch { $status = '' }
+                        if ($status -match 'status: running') { break }
+                        Start-Sleep -Milliseconds 200
+                    } while ([DateTime]::UtcNow -lt $deadline)
+                    if ($status -notmatch 'status: running') { throw 'Owned server did not become ready' }
+                    $created = (Invoke-GauntletProcess $exe @('--session', $nonce, 'workspace', 'create', '--cwd', $work, '--focus') $plan) | ConvertFrom-Json
+                    $pane = $created.result.root_pane.pane_id
+                    if (-not $pane) { throw 'Missing owned probe pane identity' }
+                    $command = '& ' + (Quote-GauntletPS $pwsh) + ' -NoProfile -File ' + (Quote-GauntletPS "$PSScriptRoot/windows_input/Probe.ps1") + ' -PlanPath ' + (Quote-GauntletPS $planPath)
+                    $null = Invoke-GauntletProcess $exe @('--session', $nonce, 'pane', 'run', $pane, $command) $plan
+                }
+                # Always request a new window. Bootstrap independently clears inherited identity.
+                $launcher = New-GauntletProcess $terminal @('-w', 'new', 'new-tab', '--title', $nonce, '--suppressApplicationTitle', '--', $pwsh, '-NoProfile', '-File', "$PSScriptRoot/windows_input/Bootstrap.ps1", '-PlanPath', $planPath) $plan
+                $deadline = [DateTime]::UtcNow.AddSeconds(25)
+                do {
+                    Update-GauntletLease $root
+                    $window = [HerdrInputGauntlet.Desktop]::Find($nonce)
+                    if ($window -ne [IntPtr]::Zero) { break }
+                    Start-Sleep -Milliseconds 100
+                } while ([DateTime]::UtcNow -lt $deadline)
+                if ($window -eq [IntPtr]::Zero) { throw 'No unique owned Terminal window appeared' }
+                $windowPid = [HerdrInputGauntlet.Desktop]::Pid($window)
+                $windowProcess = Get-Process -Id $windowPid
+                if ($windowProcess.ProcessName -ne 'WindowsTerminal') { throw 'Nonce window is not Windows Terminal; refusing injection' }
+                $runRecord = @{ nonce = $nonce; path = $path; mode = $mode; hwnd = $window.ToInt64(); pid = $windowPid;
+                    terminal_path = $windowProcess.Path; terminal_version = $windowProcess.MainModule.FileVersionInfo.FileVersion;
+                    layout = [HerdrInputGauntlet.Desktop]::Layout($window) }
+                $hostRecord.runs += $runRecord
+                $ready = Wait-GauntletJson (Join-Path $work 'ready.json') $root { param($v) $v.nonce -eq $nonce -and $v.mode -eq $mode }
+                [HerdrInputGauntlet.Desktop]::Focus($window, $nonce, $windowPid)
+                Start-Sleep -Milliseconds 500
+                # Full case catalogue once; boundary geometries run discriminating sentinels.
+                $geometries = @(@{ width = 120; height = 30; full = $true })
+                foreach ($height in $Heights) { foreach ($width in $Widths) { $geometries += @{ width = $width; height = $height; full = $false } } }
+                # Return narrow after wide to exercise repeated reflow/recovery.
+                $geometries += @{ width = 80; height = 30; full = $false }
+                $phase = 0
+                foreach ($geometry in $geometries) {
+                    $phase++
+                    $selected = if ($geometry.full) { $matrix.cases } else { @($matrix.cases | Where-Object { $_.id -in @('letter-a', 'shift-enter', 'paste-lf') }) }
+                    $outer = Set-ObservedGeometry $plan $window $windowPid $geometry.width $geometry.height
+                    foreach ($case in $selected) {
+                        $row = New-Observation $hostName $plan $geometry.width $geometry.height $case
+                        $row.phase = $phase
+                        $document.observations += $row
+                        if ($case.kind -eq 'qualification' -or -not $case.expected.ContainsKey($mode)) { $row.status = 'not_run'; $row.reason = 'Requires separate qualification: ' + $case.id; continue }
+                        if ($case.kind -eq 'manual' -and -not $Manual) { $row.status = 'not_run'; $row.reason = 'Operator-assisted case; rerun with -Manual and declared layout'; continue }
+                        if ($null -eq $outer) { $row.status = 'not_run'; $row.reason = 'Requested cell geometry not reached; monitor/font/window constraints'; continue }
+                        $fresh = Outer-State $plan
+                        if ($fresh.geometry[0] -ne $geometry.width -or $fresh.geometry[1] -ne $geometry.height) {
+                            $fresh = Set-ObservedGeometry $plan $window $windowPid $geometry.width $geometry.height
+                            if ($null -eq $fresh) { $row.status = 'inconclusive'; $row.reason = 'Geometry changed and could not be restored'; continue }
+                        }
+                        $row.outer_geometry = $fresh.geometry
+                        $row.outer_sequence = $fresh.sequence
+                        $row.negotiation_hex = $ready.negotiation_hex
+                        if ($mode -eq 'kitty' -and -not $ready.kitty_acknowledged) { $row.status = 'inconclusive'; $row.reason = 'Kitty disambiguation query not acknowledged; host support is not established'; continue }
+                        if ($case.kind -eq 'paste' -and [HerdrInputGauntlet.Desktop]::CountClipboardFormats() -ne 0) {
+                            $row.status = 'not_run'; $row.reason = 'Clipboard is not empty; refusing to replace user data'; continue
+                        }
+                        $begin = Observer-Request $plan 'begin'
+                        $row.ready = $true; $row.pane_geometry = $begin.geometry
+                        [HerdrInputGauntlet.Desktop]::Guard($window, $nonce, $windowPid)
+                        $row.focus_verified = $true
+                        if ($case.kind -eq 'key') {
+                            $row.scans = @([HerdrInputGauntlet.Desktop]::Scans($window, [int[]]$case.chords[0]))
+                            foreach ($chord in $case.chords) { $null = [HerdrInputGauntlet.Desktop]::Chord($window, $nonce, $windowPid, [int[]]$chord) }
+                        } elseif ($case.kind -eq 'paste') {
+                            $clipboardSequence = [HerdrInputGauntlet.Desktop]::SetEmptyClipboard($window, $case.text)
+                            $null = [HerdrInputGauntlet.Desktop]::Chord($window, $nonce, $windowPid, [int[]]@(17, 86))
+                        } else {
+                            Write-Host "$($case.id): $($case.prompt) Return to this controller and press Enter after the gesture."
+                            # Manual waits are bounded by the independent bootstrap lease watchdog.
+                            $null = Read-Host
+                            $row.operator_layout = [HerdrInputGauntlet.Desktop]::Layout($window)
+                        }
+                        Start-Sleep -Milliseconds 500
+                        if ($case.kind -ne 'manual') { [HerdrInputGauntlet.Desktop]::Guard($window, $nonce, $windowPid) }
+                        $end = Observer-Request $plan 'end'
+                        $row.capture_id = $end.id
+                        $row.hex = $end.hex; $row.records = $end.records; $row.error = $end.error; $row.complete = $end.quiet_reached
+                        $row.final_outer_geometry = (Outer-State $plan).geometry
+                        $row.status = 'observed'; $row.final_pane_geometry = $end.geometry
+                        if ($null -ne $clipboardSequence) {
+                            if (-not [HerdrInputGauntlet.Desktop]::ClearOwnedClipboard($clipboardSequence)) { throw 'Could not clear test-owned clipboard' }
+                            $clipboardSequence = $null
+                        }
+                        if ($case.kind -eq 'manual') { [HerdrInputGauntlet.Desktop]::Focus($window, $nonce, $windowPid) }
+                        Save-Report
+                        Update-GauntletLease $root
+                    }
+                }
+            } catch {
+                $document.errors += "$nonce : $($_.Exception.Message)"
+                Save-Report
+                # Abort the campaign on lost focus, readiness failure or partial injection.
+                throw
+            } finally {
+                if ($null -ne $clipboardSequence -and -not [HerdrInputGauntlet.Desktop]::ClearOwnedClipboard($clipboardSequence)) { $document.cleanup_errors += 'Could not clear test-owned clipboard' }
+                [IO.File]::WriteAllText((Join-Path $work 'probe-stop'), '')
+                if (Test-Path (Join-Path $work 'ready.json')) {
+                    try {
+                        $probeExit = Wait-GauntletJson (Join-Path $work 'probe-exit.json') $root { param($v) $v.nonce -eq $nonce } -Timeout 5
+                        $document.cleanup_errors += @($probeExit.cleanup_errors)
+                    } catch { $document.cleanup_errors += $_.Exception.Message }
+                }
+                # Normal detach only while still owning foreground focus; never type into another window.
+                if ($path -eq 'herdr' -and [HerdrInputGauntlet.Desktop]::IsOwned($window, $nonce, $windowPid) -and [HerdrInputGauntlet.Desktop]::GetForegroundWindow() -eq $window) {
+                    try {
+                        $null = [HerdrInputGauntlet.Desktop]::Chord($window, $nonce, $windowPid, [int[]]@(17, 66))
+                        Start-Sleep -Milliseconds 100
+                        $null = [HerdrInputGauntlet.Desktop]::Chord($window, $nonce, $windowPid, [int[]]@(81))
+                    } catch { $document.cleanup_errors += $_.Exception.Message }
+                }
+                [IO.File]::WriteAllText((Join-Path $work 'stop'), '')
+                if ($window -ne [IntPtr]::Zero) {
+                    try {
+                        $exitRecord = Wait-GauntletJson (Join-Path $work 'bootstrap-exit.json') $root { param($v) $v.nonce -eq $nonce } -Timeout 45
+                        $document.cleanup_errors += @($exitRecord.cleanup_errors)
+                        if ($exitRecord.before[2] -ne $exitRecord.after[2]) { $document.cleanup_errors += "$nonce console input mode not restored" }
+                    } catch { $document.cleanup_errors += $_.Exception.Message }
+                    [HerdrInputGauntlet.Desktop]::Close($window, $nonce, $windowPid)
+                }
+                if ($null -ne $server) {
+                    if (-not $server.HasExited) {
+                        try { $null = Invoke-GauntletProcess $exe @('session', 'stop', $nonce) $plan } catch { $document.cleanup_errors += $_.Exception.Message }
+                    }
+                    if (-not $server.WaitForExit(5000)) { $server.Kill($true); $document.cleanup_errors += "$nonce server required forced cleanup" }
+                    if (-not (Test-Path (Join-Path $work 'bootstrap-exit.json'))) {
+                        try { $null = Invoke-GauntletProcess $exe @('session', 'delete', $nonce) $plan } catch { $document.cleanup_errors += $_.Exception.Message }
+                    }
+                    $server.Dispose()
+                }
+                if ($null -ne $launcher) { $launcher.Dispose() }
+                Save-Report
+            }
+        } }
+    }
+} catch {
+    if ($document.errors.Count -eq 0) { $document.errors += $_.Exception.Message }
+} finally { [HerdrInputGauntlet.Desktop]::StopEmergencyStop(); Save-Report }
+& $python $reportScript report --input $rawReport --output $artifactReport
+$code = $LASTEXITCODE
+Write-Host "Evidence and report: $root"
+exit $code
