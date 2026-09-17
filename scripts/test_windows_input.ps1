@@ -45,13 +45,13 @@ $artifactReport = Join-Path $root 'report.json'
 
 function Save-Report { Write-GauntletJson $rawReport $document }
 function Resolve-Terminal($Name, $Override) {
-    if ($Override) { return (Resolve-Path -LiteralPath $Override).Path }
+    if ($Override) { return @{ path = (Resolve-Path -LiteralPath $Override).Path; app_user_model_id = $null } }
     $packageName = if ($Name -eq 'stable') { 'Microsoft.WindowsTerminal' } else { 'Microsoft.WindowsTerminalPreview' }
     $package = @(Get-AppxPackage -Name $packageName -ErrorAction SilentlyContinue | Sort-Object Version -Descending)
     if ($package.Count -eq 0) { return $null }
     $path = Join-Path $package[0].InstallLocation 'WindowsTerminal.exe'
     if (-not (Test-Path -LiteralPath $path)) { return $null }
-    return $path
+    return @{ path = $path; app_user_model_id = "$($package[0].PackageFamilyName)!App" }
 }
 function Observer-Request($Plan, $Action) {
     $id = [guid]::NewGuid().ToString('N')
@@ -90,8 +90,8 @@ try {
     $launcherIdentities = @{}; $installationIdentities = @{}
     foreach ($channel in @('stable', 'preview')) {
         if ($terminals[$channel]) {
-            $launcherIdentities[$channel] = [HerdrInputGauntlet.Desktop]::FileIdentity($terminals[$channel])
-            $installationIdentities[$channel] = [HerdrInputGauntlet.Desktop]::FileIdentity([IO.Path]::GetDirectoryName($terminals[$channel]))
+            $launcherIdentities[$channel] = [HerdrInputGauntlet.Desktop]::FileIdentity($terminals[$channel].path)
+            $installationIdentities[$channel] = [HerdrInputGauntlet.Desktop]::FileIdentity([IO.Path]::GetDirectoryName($terminals[$channel].path))
         }
     }
     if ($terminals.stable -and $terminals.preview -and ($launcherIdentities.stable -eq $launcherIdentities.preview -or $installationIdentities.stable -eq $installationIdentities.preview)) {
@@ -104,7 +104,7 @@ try {
             Save-Report
             continue
         }
-        $hostRecord = @{ channel = $hostName; launcher = $terminal; launcher_version = (Get-Item $terminal).VersionInfo.FileVersion;
+        $hostRecord = @{ channel = $hostName; launcher = $terminal.path; launcher_version = (Get-Item $terminal.path).VersionInfo.FileVersion;
             launcher_identity = $launcherIdentities[$hostName]; installation_identity = $installationIdentities[$hostName]; runs = @() }
         $document.hosts += $hostRecord
         foreach ($path in @('direct', 'herdr')) { foreach ($mode in $Modes) {
@@ -140,7 +140,12 @@ try {
                     $null = Invoke-GauntletProcess $exe @('--session', $nonce, 'pane', 'run', $pane, $command) $plan
                 }
                 # Always request a new window. Bootstrap independently clears inherited identity.
-                $launcher = New-GauntletProcess $terminal @('-w', 'new', 'new-tab', '--title', $nonce, '--suppressApplicationTitle', '--', $pwsh, '-NoProfile', '-File', "$PSScriptRoot/windows_input/Bootstrap.ps1", '-PlanPath', $planPath) $plan
+                $terminalArguments = @('-w', 'new', 'new-tab', '--title', $nonce, '--suppressApplicationTitle', '--', $pwsh, '-NoProfile', '-File', "$PSScriptRoot/windows_input/Bootstrap.ps1", '-PlanPath', $planPath)
+                if ($terminal.app_user_model_id) {
+                    $launcher = Get-Process -Id ([HerdrInputGauntlet.Desktop]::ActivateApplication($terminal.app_user_model_id, $terminalArguments)) -ErrorAction SilentlyContinue
+                } else {
+                    $launcher = New-GauntletProcess $terminal.path $terminalArguments $plan
+                }
                 $deadline = [DateTime]::UtcNow.AddSeconds(25)
                 do {
                     Update-GauntletLease $root
@@ -264,7 +269,9 @@ try {
                         $document.cleanup_errors += @($exitRecord.cleanup_errors)
                         if ($exitRecord.before[2] -ne $exitRecord.after[2]) { $document.cleanup_errors += "$nonce console input mode not restored" }
                     } catch { $document.cleanup_errors += $_.Exception.Message }
-                    [HerdrInputGauntlet.Desktop]::Close($window, $nonce, $windowPid)
+                    $windowDeadline = [DateTime]::UtcNow.AddSeconds(5)
+                    while ([HerdrInputGauntlet.Desktop]::IsOwned($window, $nonce, $windowPid) -and [DateTime]::UtcNow -lt $windowDeadline) { Start-Sleep -Milliseconds 100 }
+                    if ([HerdrInputGauntlet.Desktop]::IsOwned($window, $nonce, $windowPid)) { $document.cleanup_errors += "$nonce Terminal window remained open; close it manually" }
                 }
                 if ($null -ne $server) {
                     if (-not $server.HasExited) {

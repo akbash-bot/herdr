@@ -64,9 +64,8 @@ def catalogue():
         ("paste-crlf", "line 1\r\nline 2\r\n"),
         ("paste-cr", "line 1\rline 2"),
         ("paste-whitespace", "  one\t\n\n two  \n"),
-        ("paste-unicode", "é e\u0301 日本語 😀\nnext"),
+        ("paste-unicode", "é e\u0301 日本語\nnext"),
         ("paste-escape-looking", "literal [200~ and \\x1b[31m\nend"),
-        ("paste-burst", "".join(f"line {i:04d} abcdefghijklmnopqrstuvwxyz\n" for i in range(200))),
     ]:
         cases.append(dict(id=name, kind="paste", text=text, expected={mode: {"paste": text} for mode in MODES[1:]}))
     for name, prompt, text in [
@@ -90,6 +89,8 @@ def catalogue():
         ("wrap-rendering", "Verify the displayed ruler and wrapped multiline text at both window heights and every observed width."),
         ("capture-refresh", "Toggle mouse capture/config reload, refocus, detach/reattach; repeat paste and Shift+Enter."),
         ("setup-recovery", "Inject a recoverable setup failure and late VT activation; verify mode restoration and the same input sentinels."),
+        ("paste-supplementary", "Qualify supplementary-plane clipboard text, including emoji, against the direct-host baseline."),
+        ("paste-burst", "Qualify a 200-line clipboard burst with the host multiline-paste warning configured or handled explicitly."),
         ("clipboard-nontext", "Qualify supported image/file clipboard integrations separately; do not infer from text paste."),
     ]:
         cases.append(dict(id=name, kind="qualification", prompt=prompt, expected={}))

@@ -9,6 +9,16 @@ using System.Text;
 using System.Threading;
 
 namespace HerdrInputGauntlet {
+    [ComImport, Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C")]
+    class ApplicationActivationManager { }
+
+    [ComImport, Guid("2E941141-7F97-4756-BA1D-9DECDE894A3D"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IApplicationActivationManager {
+        [PreserveSig]
+        int ActivateApplication([MarshalAs(UnmanagedType.LPWStr)] string appUserModelId,
+            [MarshalAs(UnmanagedType.LPWStr)] string arguments, uint options, out uint processId);
+    }
+
     public static class Desktop {
         [StructLayout(LayoutKind.Sequential)] public struct Point { public int X, Y; }
         [StructLayout(LayoutKind.Sequential)] public struct Rect { public int Left, Top, Right, Bottom; }
@@ -104,7 +114,27 @@ namespace HerdrInputGauntlet {
         [DllImport("kernel32.dll")] static extern IntPtr GlobalLock(IntPtr memory);
         [DllImport("kernel32.dll")] static extern bool GlobalUnlock(IntPtr memory);
         [DllImport("kernel32.dll")] static extern IntPtr GlobalFree(IntPtr memory);
-        [DllImport("user32.dll")] static extern bool PostMessage(IntPtr hwnd, uint msg, IntPtr wparam, IntPtr lparam);
+
+        static string QuoteArgument(string value) {
+            if(value.Length>0 && value.IndexOfAny(new[]{' ', '\t', '\n', '\v', '"'})<0) return value;
+            var result=new StringBuilder("\"");
+            int slashes=0;
+            foreach(char c in value) {
+                if(c=='\\') { slashes++; continue; }
+                if(c=='"') result.Append('\\',slashes*2+1);
+                else result.Append('\\',slashes);
+                result.Append(c); slashes=0;
+            }
+            result.Append('\\',slashes*2).Append('"');
+            return result.ToString();
+        }
+        public static int ActivateApplication(string appUserModelId,string[] arguments) {
+            var manager=(IApplicationActivationManager)new ApplicationActivationManager();
+            uint pid;
+            int result=manager.ActivateApplication(appUserModelId,string.Join(" ",Array.ConvertAll(arguments,QuoteArgument)),0,out pid);
+            if(result<0) Marshal.ThrowExceptionForHR(result);
+            return checked((int)pid);
+        }
 
         public static uint SetEmptyClipboard(IntPtr owner,string text) {
             if(!OpenClipboard(owner)) throw new Exception("Clipboard busy; refusing replacement");
@@ -119,8 +149,9 @@ namespace HerdrInputGauntlet {
                 try { Marshal.Copy(data,0,pointer,data.Length); } finally { GlobalUnlock(memory); }
                 if(!EmptyClipboard() || SetClipboardData(13,memory)==IntPtr.Zero) throw new Exception("Clipboard write failed");
                 memory=IntPtr.Zero; // ownership transferred to Windows
-                return GetClipboardSequenceNumber();
             } finally { if(memory!=IntPtr.Zero) GlobalFree(memory); CloseClipboard(); }
+            // Closing can synthesize additional formats and advance the sequence.
+            return GetClipboardSequenceNumber();
         }
         public static bool ClearOwnedClipboard(uint sequence) {
             if(!OpenClipboard(IntPtr.Zero)) return false;
@@ -190,9 +221,6 @@ namespace HerdrInputGauntlet {
             int w=r.Right-r.Left+dx,h=r.Bottom-r.Top+dy;
             if(w<300 || h<200 || w>10000 || h>10000) throw new Exception("Unsafe resize request");
             if(!SetWindowPos(hwnd,IntPtr.Zero,0,0,w,h,0x16)) throw new Win32Exception();
-        }
-        public static void Close(IntPtr hwnd,string nonce,int pid) {
-            if(IsOwned(hwnd,nonce,pid)) PostMessage(hwnd,0x10,IntPtr.Zero,IntPtr.Zero);
         }
     }
 

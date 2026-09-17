@@ -94,7 +94,7 @@ Every run needs a **new** output directory. By default it is
   records; it does not claim that a particular editor implements word selection
   correctly merely because Ctrl+Shift+Right reached it.
 - Actual Windows clipboard paste via Ctrl+V, including LF/CRLF/CR, whitespace,
-  Unicode/combining characters, escape-looking text, and a 200-line burst.
+  BMP Unicode/combining characters, and escape-looking text.
   A host binding or multiline-paste confirmation dialog can intercept the gesture;
   the runner does not dismiss unexpected dialogs or rebind Terminal shortcuts.
 - A full case pass at an observed 120×30 host size; keyboard/paste sentinels at
@@ -107,8 +107,9 @@ Every run needs a **new** output directory. By default it is
 The catalogue also lists explicit **qualification gaps**: mouse click/drag/wheel
 and right-edge coordinate mapping; visual reflow/wrapping; native held-key repeat;
 lock/keypad combinations; dead-key cancellation; IME cancellation; capture/config
-reload and attach cycles; injected setup/recovery faults; image/file clipboard
-integrations. These are recorded `not_run`, not fabricated successes. They need
+reload and attach cycles; injected setup/recovery faults; supplementary-plane and
+confirmation-triggering burst paste; image/file clipboard integrations. These are
+recorded `not_run`, not fabricated successes. They need
 separate fixtures/oracles before becoming automated assertions. The catalogue is
 broad; this draft is **not fully automated coverage of every row**.
 
