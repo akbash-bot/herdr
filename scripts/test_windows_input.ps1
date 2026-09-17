@@ -10,6 +10,9 @@ param(
     [string] $PreviewPath,
     [ValidateSet('default', 'win32', 'vt')][string] $Profile = 'default',
     [ValidateSet('native', 'legacy', 'mok2', 'kitty')][string[]] $Modes = @('native', 'legacy', 'mok2', 'kitty'),
+    [ValidateSet('stable', 'preview')][string[]] $Channels = @('stable', 'preview'),
+    [ValidateSet('direct', 'herdr')][string[]] $Paths = @('direct', 'herdr'),
+    [string[]] $Cases,
     [int[]] $Widths = @(80, 119, 120, 121, 132, 160, 240),
     [int[]] $Heights = @(24, 50),
     [string] $OutputDirectory,
@@ -26,6 +29,9 @@ $root = [IO.Directory]::CreateDirectory($OutputDirectory).FullName
 $null = Invoke-GauntletProcess $python @($reportScript, 'matrix', '--output', (Join-Path $root 'matrix.json'))
 $matrix = Read-GauntletJson (Join-Path $root 'matrix.json')
 if ($MatrixOnly) { Write-Host "Matrix: $root/matrix.json"; exit 0 }
+$knownCases = @($matrix.cases | ForEach-Object id)
+if (@($Cases).Count -and @($Cases | Where-Object { $_ -notin $knownCases }).Count) { throw 'Unknown case selection' }
+$selectedCases = if (@($Cases).Count) { @($matrix.cases | Where-Object id -in $Cases) } else { @($matrix.cases) }
 if (-not $IsWindows) { throw 'Real-host qualification requires Windows and an interactive desktop; no tests passed' }
 if (-not $AllowInputInjection) { throw 'Read scripts/windows_input/README.md, then explicitly pass -AllowInputInjection on an isolated desktop' }
 if (-not [Environment]::UserInteractive) { throw 'Interactive desktop unavailable' }
@@ -63,12 +69,14 @@ if ($sourceCommit) { Write-Host "Source: $sourceCommit$(if ($sourceDirty) { ' + 
 Write-Host "Herdr under test: $exe"
 Write-Host "SHA-256: $exeHash"
 Write-Host "Modes: $($Modes -join ', '); widths: $($Widths -join ', '); heights: $($Heights -join ', ')"
+Write-Host "Channels: $($Channels -join ', '); paths: $($Paths -join ', '); cases: $(if (@($Cases).Count) { $Cases -join ', ' } else { 'all' })"
 Write-Host "Clipboard formats at start: $([HerdrInputGauntlet.Desktop]::CountClipboardFormats()) (paste runs only when zero)"
 $document = @{ schema = 1; run = [IO.Path]::GetFileName($root); started = [DateTime]::UtcNow.ToString('O');
     source_commit = $sourceCommit; source_dirty = $sourceDirty; exe = $exe; exe_sha256 = $exeHash;
     powershell = $PSVersionTable.PSVersion.ToString(); os = [Environment]::OSVersion.VersionString;
     profile = $Profile; controller_elevated = $false; observations = @(); hosts = @(); errors = @(); cleanup_errors = @();
-    widths = $Widths; heights = $Heights; modes = $Modes; note = 'Desktop input evidence; native qualification still required' }
+    widths = $Widths; heights = $Heights; modes = $Modes; channels = $Channels; paths = $Paths;
+    cases = @($selectedCases | ForEach-Object id); note = 'Desktop input evidence; native qualification still required' }
 $rawReport = Join-Path $root 'observations.json'
 $artifactReport = Join-Path $root 'report.json'
 
@@ -82,9 +90,9 @@ function Resolve-Terminal($Name, $Override) {
     if (-not (Test-Path -LiteralPath $path)) { return $null }
     return @{ path = $path; app_user_model_id = "$($package[0].PackageFamilyName)!App" }
 }
-function Observer-Request($Plan, $Action) {
+function Observer-Request($Plan, $Action, $Value = $null) {
     $id = [guid]::NewGuid().ToString('N')
-    Write-GauntletJson (Join-Path $Plan.work 'request.json') @{ id = $id; nonce = $Plan.nonce; action = $Action }
+    Write-GauntletJson (Join-Path $Plan.work 'request.json') @{ id = $id; nonce = $Plan.nonce; action = $Action; value = $Value }
     $reply = Wait-GauntletJson (Join-Path $Plan.work 'reply.json') $root { param($v) $v.id -eq $id -and $v.nonce -eq $Plan.nonce -and $v.action -eq $Action }
     if ($reply.error) { throw "Observer failed: $($reply.error)" }
     return $reply
@@ -116,22 +124,22 @@ function New-Observation($HostName, $Plan, $Width, $Height, $Case) {
 try {
     [HerdrInputGauntlet.Desktop]::StartEmergencyStop()
     $terminals = @{ stable = (Resolve-Terminal 'stable' $StablePath); preview = (Resolve-Terminal 'preview' $PreviewPath) }
-    foreach ($channel in @('stable', 'preview')) {
+    foreach ($channel in $Channels) {
         $terminal = $terminals[$channel]
         if ($terminal) { Write-Host "Windows Terminal $channel`: $($terminal.path) ($((Get-Item $terminal.path).VersionInfo.FileVersion))" }
         else { Write-Host "Windows Terminal $channel`: not installed (channel will be not_run)" }
     }
     $launcherIdentities = @{}; $installationIdentities = @{}
-    foreach ($channel in @('stable', 'preview')) {
+    foreach ($channel in $Channels) {
         if ($terminals[$channel]) {
             $launcherIdentities[$channel] = [HerdrInputGauntlet.Desktop]::FileIdentity($terminals[$channel].path)
             $installationIdentities[$channel] = [HerdrInputGauntlet.Desktop]::FileIdentity([IO.Path]::GetDirectoryName($terminals[$channel].path))
         }
     }
-    if ($terminals.stable -and $terminals.preview -and ($launcherIdentities.stable -eq $launcherIdentities.preview -or $installationIdentities.stable -eq $installationIdentities.preview)) {
+    if ($Channels -contains 'stable' -and $Channels -contains 'preview' -and $terminals.stable -and $terminals.preview -and ($launcherIdentities.stable -eq $launcherIdentities.preview -or $installationIdentities.stable -eq $installationIdentities.preview)) {
         throw 'Stable and Preview resolve to the same executable/installation; refusing duplicate channel evidence'
     }
-    foreach ($hostName in @('stable', 'preview')) {
+    foreach ($hostName in $Channels) {
         $terminal = $terminals[$hostName]
         if (-not $terminal) {
             $document.hosts += @{ channel = $hostName; status = 'not_run'; reason = 'Terminal installation not found; supply explicit path' }
@@ -141,7 +149,7 @@ try {
         $hostRecord = @{ channel = $hostName; launcher = $terminal.path; launcher_version = (Get-Item $terminal.path).VersionInfo.FileVersion;
             launcher_identity = $launcherIdentities[$hostName]; installation_identity = $installationIdentities[$hostName]; runs = @() }
         $document.hosts += $hostRecord
-        foreach ($path in @('direct', 'herdr')) { foreach ($mode in $Modes) {
+        foreach ($path in $Paths) { foreach ($mode in $Modes) {
             $nonce = 'herdr-gauntlet-' + [guid]::NewGuid().ToString('N')
             $work = [IO.Directory]::CreateDirectory((Join-Path $root $nonce)).FullName
             $configHome = [IO.Directory]::CreateDirectory((Join-Path $work 'config')).FullName
@@ -153,6 +161,7 @@ try {
             $planPath = Join-Path $work 'plan.json'
             Write-GauntletJson $planPath $plan
             $window = [IntPtr]::Zero; $windowPid = 0; $server = $null; $launcher = $null; $clipboardSequence = $null; $injectionAuthorized = $false
+            $cursorPosition = $null; $mouseReporting = $false
             Update-GauntletLease $root
             try {
                 if ($path -eq 'herdr') {
@@ -221,14 +230,26 @@ try {
                 $phase = 0
                 foreach ($geometry in $geometries) {
                     $phase++
-                    $selected = if ($geometry.full) { $matrix.cases } else { @($matrix.cases | Where-Object { $_.id -in @('letter-a', 'shift-enter', 'paste-lf') }) }
+                    $selected = if ($geometry.full) { $selectedCases } else { @($selectedCases | Where-Object { $_.id -in @('letter-a', 'shift-enter', 'paste-lf') }) }
                     $outer = Set-ObservedGeometry $plan $window $windowPid $geometry.width $geometry.height
                     foreach ($case in $selected) {
                         $row = New-Observation $hostName $plan $geometry.width $geometry.height $case
                         $row.phase = $phase
                         $document.observations += $row
                         if ($case.kind -eq 'qualification' -or -not $case.expected.ContainsKey($mode)) { $row.status = 'not_run'; $row.reason = 'Requires separate qualification: ' + $case.id; continue }
+                        if ($case.kind -eq 'mode-transitions' -and $path -ne 'herdr') { $row.status = 'not_run'; $row.reason = 'Runtime transitions are a through-Herdr qualification'; continue }
                         if ($case.kind -eq 'manual' -and -not $Manual) { $row.status = 'not_run'; $row.reason = 'Operator-assisted case; rerun with -Manual and declared layout'; continue }
+                        $layoutChords = $null
+                        if ($case.kind -eq 'layout-key') {
+                            try {
+                                $layoutChords = @([HerdrInputGauntlet.Desktop]::DeadKeyChord($window, [char]$case.dead), [int[]]@([int]$case.base_vk))
+                                $row.input_layout = [HerdrInputGauntlet.Desktop]::Layout($window)
+                            } catch {
+                                $row.status = 'not_run'
+                                $row.reason = if ($_.Exception.InnerException) { $_.Exception.InnerException.Message } else { $_.Exception.Message }
+                                continue
+                            }
+                        }
                         if ($null -eq $outer) { $row.status = 'not_run'; $row.reason = 'Requested cell geometry not reached; monitor/font/window constraints'; continue }
                         $fresh = Outer-State $plan
                         if ($fresh.geometry[0] -ne $geometry.width -or $fresh.geometry[1] -ne $geometry.height) {
@@ -239,9 +260,10 @@ try {
                         $row.outer_sequence = $fresh.sequence
                         $row.negotiation_hex = $ready.negotiation_hex
                         if ($mode -eq 'kitty' -and -not $ready.kitty_acknowledged) { $row.status = 'inconclusive'; $row.reason = 'Kitty disambiguation query not acknowledged; host support is not established'; continue }
-                        if ($case.kind -eq 'paste' -and [HerdrInputGauntlet.Desktop]::CountClipboardFormats() -ne 0) {
+                        if ($case.kind -in @('paste', 'mouse-interleave') -and [HerdrInputGauntlet.Desktop]::CountClipboardFormats() -ne 0) {
                             $row.status = 'not_run'; $row.reason = 'Clipboard is not empty; refusing to replace user data'; continue
                         }
+                        if ($case.kind -eq 'mouse-interleave') { $null = Observer-Request $plan 'mouse-on'; $mouseReporting = $true }
                         $begin = Observer-Request $plan 'begin'
                         $row.ready = $true; $row.pane_geometry = $begin.geometry
                         [HerdrInputGauntlet.Desktop]::Guard($window, $nonce, $windowPid)
@@ -252,6 +274,30 @@ try {
                         } elseif ($case.kind -eq 'paste') {
                             $clipboardSequence = [HerdrInputGauntlet.Desktop]::SetEmptyClipboard($window, $case.text)
                             $null = [HerdrInputGauntlet.Desktop]::Chord($window, $nonce, $windowPid, [int[]]@(17, 86))
+                        } elseif ($case.kind -eq 'mouse-interleave') {
+                            $cursorPosition = [HerdrInputGauntlet.Desktop]::Cursor()
+                            $null = [HerdrInputGauntlet.Desktop]::Chord($window, $nonce, $windowPid, [int[]]@(65))
+                            [HerdrInputGauntlet.Desktop]::MouseMoveInside($window, $nonce, $windowPid, -60)
+                            Start-Sleep -Milliseconds 150
+                            $clipboardSequence = [HerdrInputGauntlet.Desktop]::SetEmptyClipboard($window, $case.text)
+                            $null = [HerdrInputGauntlet.Desktop]::Chord($window, $nonce, $windowPid, [int[]]@(17, 86))
+                            Start-Sleep -Milliseconds 150
+                            [HerdrInputGauntlet.Desktop]::MouseMoveInside($window, $nonce, $windowPid, 60)
+                            Start-Sleep -Milliseconds 150
+                            $null = [HerdrInputGauntlet.Desktop]::Chord($window, $nonce, $windowPid, [int[]]@(66))
+                        } elseif ($case.kind -eq 'mode-transitions') {
+                            foreach ($step in @(
+                                @{ mode = $null; chords = @([int[]]@(65), [int[]]@(16, 13)) },
+                                @{ mode = 'mok2'; chords = @([int[]]@(66), [int[]]@(16, 13)) },
+                                @{ mode = 'kitty'; chords = @([int[]]@(67), [int[]]@(16, 13)) },
+                                @{ mode = 'mok2'; chords = @([int[]]@(68), [int[]]@(16, 13)) },
+                                @{ mode = 'legacy'; chords = @([int[]]@(69), [int[]]@(16, 13), [int[]]@(70)) }
+                            )) {
+                                if ($step.mode) { $null = Observer-Request $plan 'set-mode' $step.mode; Start-Sleep -Milliseconds 200 }
+                                foreach ($chord in $step.chords) { $null = [HerdrInputGauntlet.Desktop]::Chord($window, $nonce, $windowPid, [int[]]$chord) }
+                            }
+                        } elseif ($case.kind -eq 'layout-key') {
+                            foreach ($chord in $layoutChords) { $null = [HerdrInputGauntlet.Desktop]::Chord($window, $nonce, $windowPid, [int[]]$chord) }
                         } else {
                             Write-Host "$($case.id): $($case.prompt) Return to this controller and press Enter after the gesture."
                             # Manual waits are bounded by the independent bootstrap lease watchdog.
@@ -269,6 +315,8 @@ try {
                             if (-not [HerdrInputGauntlet.Desktop]::ClearOwnedClipboard($clipboardSequence)) { throw 'Could not clear test-owned clipboard' }
                             $clipboardSequence = $null
                         }
+                        if ($mouseReporting) { $null = Observer-Request $plan 'mouse-off'; $mouseReporting = $false }
+                        if ($null -ne $cursorPosition) { [HerdrInputGauntlet.Desktop]::RestoreCursor($cursorPosition); $cursorPosition = $null }
                         if ($case.kind -eq 'manual') { [HerdrInputGauntlet.Desktop]::Focus($window, $nonce, $windowPid) }
                         Save-Report
                         Update-GauntletLease $root
@@ -280,6 +328,12 @@ try {
                 # Abort the campaign on lost focus, readiness failure or partial injection.
                 throw
             } finally {
+                if ($mouseReporting) {
+                    try { $null = Observer-Request $plan 'mouse-off'; $mouseReporting = $false } catch { $document.cleanup_errors += $_.Exception.Message }
+                }
+                if ($null -ne $cursorPosition -and [HerdrInputGauntlet.Desktop]::GetForegroundWindow() -eq $window) {
+                    [HerdrInputGauntlet.Desktop]::RestoreCursor($cursorPosition); $cursorPosition = $null
+                }
                 if ($null -ne $clipboardSequence -and -not [HerdrInputGauntlet.Desktop]::ClearOwnedClipboard($clipboardSequence)) { $document.cleanup_errors += 'Could not clear test-owned clipboard' }
                 [IO.File]::WriteAllText((Join-Path $work 'probe-stop'), '')
                 if (Test-Path (Join-Path $work 'ready.json')) {
@@ -296,6 +350,10 @@ try {
                         $null = [HerdrInputGauntlet.Desktop]::Chord($window, $nonce, $windowPid, [int[]]@(81))
                     } catch { $document.cleanup_errors += $_.Exception.Message }
                 }
+                if ($null -ne $server -and -not $server.HasExited) {
+                    try { $null = Invoke-GauntletProcess $exe @('session', 'stop', $nonce) $plan }
+                    catch { if (-not $server.WaitForExit(1000)) { $document.cleanup_errors += $_.Exception.Message } }
+                }
                 [IO.File]::WriteAllText((Join-Path $work 'stop'), '')
                 if ($window -ne [IntPtr]::Zero) {
                     try {
@@ -308,9 +366,6 @@ try {
                     if ([HerdrInputGauntlet.Desktop]::IsOwned($window, $nonce, $windowPid)) { $document.cleanup_errors += "$nonce Terminal window remained open; close it manually" }
                 }
                 if ($null -ne $server) {
-                    if (-not $server.HasExited) {
-                        try { $null = Invoke-GauntletProcess $exe @('session', 'stop', $nonce) $plan } catch { $document.cleanup_errors += $_.Exception.Message }
-                    }
                     if (-not $server.WaitForExit(5000)) {
                         $server.Kill($true)
                         $document.cleanup_errors += "$nonce server required forced cleanup"

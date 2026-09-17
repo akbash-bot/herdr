@@ -25,6 +25,18 @@ try {
             if ($request.nonce -ne $plan.nonce) { throw 'Unexpected observer nonce' }
             $last = $request.id
             $quietReached = $false
+            if ($request.action -eq 'mouse-on') {
+                [HerdrInputGauntlet.ConsoleProbe]::Print("`e[?1003h`e[?1006h")
+                Start-Sleep -Milliseconds 200
+            }
+            if ($request.action -eq 'mouse-off') {
+                [HerdrInputGauntlet.ConsoleProbe]::Print("`e[?1003l`e[?1006l")
+                Start-Sleep -Milliseconds 100
+            }
+            if ($request.action -eq 'set-mode') {
+                $probe.SetKeyboardMode([string]$request.value)
+                Start-Sleep -Milliseconds 200
+            }
             if ($request.action -eq 'begin' -and -not $probe.ClearIfCount($closedCount)) { throw 'Unexpected input arrived between captures' }
             if ($request.action -eq 'end') {
                 # Capture trailing duplicates/releases as well as the first expected bytes.

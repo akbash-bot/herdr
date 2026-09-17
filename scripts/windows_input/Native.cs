@@ -99,8 +99,12 @@ namespace HerdrInputGauntlet {
         [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
         [DllImport("user32.dll")] static extern IntPtr GetKeyboardLayout(uint thread);
         [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hwnd);
+        [DllImport("user32.dll")] static extern bool GetCursorPos(out Point point);
+        [DllImport("user32.dll")] static extern bool SetCursorPos(int x,int y);
+        [DllImport("user32.dll")] static extern int GetSystemMetrics(int index);
         [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vk);
         [DllImport("user32.dll")] static extern uint MapVirtualKeyEx(uint key, uint kind, IntPtr layout);
+        [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int ToUnicodeEx(uint key,uint scan,byte[] state,StringBuilder text,int count,uint flags,IntPtr layout);
         [DllImport("user32.dll", SetLastError=true)] static extern uint SendInput(uint count, Input[] events, int size);
         [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr hwnd, out Rect rect);
         [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int width, int height, uint flags);
@@ -182,7 +186,13 @@ namespace HerdrInputGauntlet {
         public static void Focus(IntPtr hwnd, string nonce, int pid) {
             if(!IsOwned(hwnd,nonce,pid)) throw new Exception("Lost window ownership");
             AssertNotElevated(pid);
-            if(!SetForegroundWindow(hwnd) && GetForegroundWindow()!=hwnd) throw new Exception("Cannot focus test window; no input sent");
+            var deadline=DateTime.UtcNow.AddSeconds(3);
+            do {
+                SetForegroundWindow(hwnd);
+                if(GetForegroundWindow()==hwnd) return;
+                Thread.Sleep(100);
+            } while(DateTime.UtcNow<deadline);
+            throw new Exception("Cannot focus test window; no input sent");
         }
         public static void Neutral() {
             foreach(int key in new[]{0x10,0x11,0x12,0x5B,0x5C,1,2,4})
@@ -198,6 +208,30 @@ namespace HerdrInputGauntlet {
             var scans=new List<int>();
             foreach(int key in keys) scans.Add(Event((ushort)key,false,layout).Data.Key.Scan);
             return scans.ToArray();
+        }
+        static int[] LayoutChord(int vk,int modifiers) {
+            var keys=new List<int>();
+            if((modifiers&1)!=0) keys.Add(0x10);
+            if((modifiers&2)!=0) keys.Add(0x11);
+            if((modifiers&4)!=0) keys.Add(0x12);
+            keys.Add(vk);
+            return keys.ToArray();
+        }
+        public static int[] DeadKeyChord(IntPtr hwnd,char accent) {
+            uint ignored; var layout=GetKeyboardLayout(GetWindowThreadProcessId(hwnd,out ignored));
+            for(int modifiers=0;modifiers<8;modifiers++) for(uint vk=1;vk<255;vk++) {
+                uint scan=MapVirtualKeyEx(vk,4,layout);
+                if(scan==0) continue;
+                var state=new byte[256];
+                if((modifiers&1)!=0) state[0x10]=0x80;
+                if((modifiers&2)!=0) state[0x11]=0x80;
+                if((modifiers&4)!=0) state[0x12]=0x80;
+                var text=new StringBuilder(4);
+                // Flag 4 discovers dead keys without changing keyboard state.
+                if(ToUnicodeEx(vk,scan,state,text,text.Capacity,4,layout)<0 && text.Length>0 && text[0]==accent)
+                    return LayoutChord((int)vk,modifiers);
+            }
+            throw new Exception("Active layout has no "+accent+" dead key");
         }
         // One balanced batch; no modifier is intentionally held between calls.
         public static int Chord(IntPtr hwnd, string nonce, int pid, int[] keys) {
@@ -220,6 +254,25 @@ namespace HerdrInputGauntlet {
                 throw new Exception("SendInput incomplete (possible UIPI restriction): "+sent+"/"+events.Count);
             }
             return (int)sent;
+        }
+        public static long Cursor() {
+            Point point;
+            if(!GetCursorPos(out point)) throw new Win32Exception();
+            return ((long)(uint)point.X<<32)|(uint)point.Y;
+        }
+        public static void RestoreCursor(long packed) {
+            if(!SetCursorPos(unchecked((int)(packed>>32)),unchecked((int)packed))) throw new Win32Exception();
+        }
+        public static void MouseMoveInside(IntPtr hwnd,string nonce,int pid,int offset) {
+            Guard(hwnd,nonce,pid); Neutral(); Rect rect;
+            if(!GetWindowRect(hwnd,out rect)) throw new Win32Exception();
+            int x=(rect.Left+rect.Right)/2+offset,y=(rect.Top+rect.Bottom)/2;
+            if(x<=rect.Left+20 || x>=rect.Right-20 || y<=rect.Top+20 || y>=rect.Bottom-20) throw new Exception("Mouse target is outside the safe window interior");
+            int left=GetSystemMetrics(76),top=GetSystemMetrics(77),width=GetSystemMetrics(78),height=GetSystemMetrics(79);
+            if(width<2 || height<2) throw new Exception("Virtual desktop geometry unavailable");
+            int nx=(int)Math.Round((x-left)*65535.0/(width-1)),ny=(int)Math.Round((y-top)*65535.0/(height-1));
+            var input=new Input { Type=0, Data=new Union { Mouse=new Mouse { X=nx,Y=ny,Flags=0xC001 } } };
+            if(SendInput(1,new[]{input},Marshal.SizeOf<Input>())!=1) throw new Win32Exception(Marshal.GetLastWin32Error(),"Mouse injection failed");
         }
         public static void Resize(IntPtr hwnd,string nonce,int pid,int dx,int dy) {
             Guard(hwnd,nonce,pid); Rect r;
@@ -287,6 +340,13 @@ namespace HerdrInputGauntlet {
         public static void Print(string text) {
             byte[] data=Encoding.UTF8.GetBytes(text); uint count;
             if(!WriteFile(GetStdHandle(-11),data,(uint)data.Length,out count,IntPtr.Zero) || count!=data.Length) throw new Exception("Console output failed");
+        }
+        public void SetKeyboardMode(string mode) {
+            string sequence="\x1b[<u\x1b[>4;0m";
+            if(mode=="mok2") sequence+="\x1b[>4;2m";
+            else if(mode=="kitty") sequence+="\x1b[>1u";
+            else if(mode!="legacy") throw new Exception("Unknown keyboard mode transition");
+            Print(sequence);
         }
         void Read() {
             threadHandle=OpenThread(1,false,GetCurrentThreadId());

@@ -1,7 +1,7 @@
 """Portable tests of the gauntlet's oracle, not Windows input qualification."""
 import copy
 import unittest
-from scripts.windows_input.report import catalogue, channel_identity_errors, summarize, verdict
+from scripts.windows_input.report import catalogue, channel_identity_errors, qualification_matrix, summarize, verdict
 
 
 class WindowsInputGauntletTests(unittest.TestCase):
@@ -22,6 +22,8 @@ class WindowsInputGauntletTests(unittest.TestCase):
             for expected in case["expected"].values():
                 for value in expected.get("hex", []):
                     self.assertTrue(bytes.fromhex(value))
+        self.assertEqual(self.cases["dead-acute"]["kind"], "layout-key")
+        self.assertEqual(self.cases["altgr-euro"]["kind"], "manual")
 
     def test_default_catalogue_does_not_inject_terminal_host_actions(self):
         for case_id in ["ctrl-v", "alt-enter", "ctrl-shift-up", "ctrl-shift-down", "ctrl-shift-home", "ctrl-shift-end"]:
@@ -36,7 +38,7 @@ class WindowsInputGauntletTests(unittest.TestCase):
         correct = "1b5b32373b323b31337e"
         for value, status in [("0d", "fail"), (correct, "pass"), (correct + "0d", "fail")]:
             self.assertEqual(verdict(case, "mok2", {**self.evidence, "hex": value})[0], status)
-        self.assertEqual(verdict(case, "legacy", self.evidence)[0], "not_run")
+        self.assertEqual(verdict(case, "legacy", {**self.evidence, "hex": "0d"})[0], "unsupported")
 
     def test_focus_readiness_and_actual_geometry_are_required(self):
         case = self.cases["letter-a"]
@@ -73,6 +75,37 @@ class WindowsInputGauntletTests(unittest.TestCase):
                                (framed[:-1], "fail"), (framed + b"\r", "fail"),
                                (b"\x1b[200~\xff\x1b[201~", "fail")]:
             self.assertEqual(verdict(case, "kitty", {**self.evidence, "hex": data.hex()})[0], expected)
+
+    def test_mouse_interleave_requires_ordered_motion_and_paste(self):
+        case = self.cases["mouse-interleave"]
+        motion = b"\x1b[<35;10;5M"
+        paste = b"\x1b[200~mouse\r\npaste\x1b[201~"
+        good = b"a" + motion + paste + motion + b"b"
+        self.assertEqual(verdict(case, "kitty", {**self.evidence, "hex": good.hex()})[0], "pass")
+        for bad in (good.replace(motion, b"", 1), good + b"b", b"a" + motion + motion + paste + b"b"):
+            self.assertEqual(verdict(case, "kitty", {**self.evidence, "hex": bad.hex()})[0], "fail")
+
+    def test_runtime_mode_transition_has_one_exact_order(self):
+        case = self.cases["mode-transitions"]
+        expected = case["expected"]["legacy"]["hex"][0]
+        self.assertEqual(verdict(case, "legacy", {**self.evidence, "hex": expected})[0], "pass")
+        self.assertEqual(verdict(case, "legacy", {**self.evidence, "hex": expected + "0d"})[0], "fail")
+
+    def test_qualification_matrix_uses_observed_results_only(self):
+        observations = [
+            {"case": "shift-enter", "path": "herdr", "mode": "mok2", "status": "pass"},
+            {"case": "shift-enter", "path": "direct", "mode": "legacy", "status": "unsupported"},
+            {"case": "shift-enter", "path": "direct", "mode": "kitty", "status": "pass"},
+            {"case": "shift-enter", "path": "direct", "mode": "kitty", "status": "inconclusive"},
+        ]
+        rows = {row[0]: row[1:] for row in qualification_matrix({"observations": observations})}
+        self.assertEqual(rows["Shift+Enter"], ("PASS", "X - becomes Enter", "PASS**"))
+        self.assertEqual(rows["Multiline paste"], ("NOT TESTED", "NOT TESTED", "NOT TESTED"))
+        observations.append({"case": "dead-acute", "path": "herdr", "mode": "mok2", "status": "pass"})
+        rows = {row[0]: row[1:] for row in qualification_matrix({"observations": observations})}
+        self.assertEqual(rows["Dead-key composition"][0], "PASS")
+        self.assertEqual(rows["AltGr"], ("MANUAL", "MANUAL", "MANUAL"))
+        self.assertEqual(rows["IME composition"], ("MANUAL", "MANUAL", "MANUAL"))
 
     def test_empty_partial_and_duplicate_reports_never_become_green(self):
         self.assertFalse(summarize({})["observed_checks_passed"])

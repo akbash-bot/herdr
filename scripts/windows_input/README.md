@@ -63,15 +63,20 @@ pwsh -NoProfile -File scripts/test_windows_input.ps1 `
 
 The default tests current Herdr's **default** input policy. Diagnostic runs may
 use `-Profile win32` or `-Profile vt`; they do not replace the default run.
-`-Modes native,legacy,mok2,kitty`, `-Widths`, and `-Heights` select observer modes
-and geometry. In a direct PowerShell invocation, supply arrays normally:
+`-Modes native,legacy,mok2,kitty`, `-Channels`, `-Paths`, `-Cases`, `-Widths`, and
+`-Heights` select a focused campaign. In a direct PowerShell invocation, supply
+arrays normally:
 
 ```powershell
 .\scripts\test_windows_input.ps1 -ExePath 'C:\test-app\herdr.exe' `
-  -AllowInputInjection -Modes mok2,kitty -Widths 119,120,121,160 -Heights 24
+  -AllowInputInjection -Modes legacy,kitty -Cases mouse-interleave,mode-transitions `
+  -Widths 120 -Heights 30
 ```
 
-`-Manual` enables guided composition cases. The operator must activate the
+Dead-key acute composition is automatic when the target Terminal thread's
+active layout exposes that physical mapping. The runner discovers and injects
+the real scan-code chord; it never substitutes pasted or Unicode-packet text.
+`-Manual` enables AltGr, IME, and the remaining guided composition cases. The operator must activate the
 indicated layout/IME, perform the gesture in the test window, then return to the
 controller and press Enter. Finish each prompt within the 90-second lease.
 Record the layout you actually selected in your qualification notes; the report
@@ -106,7 +111,10 @@ Every run needs a **new** output directory. By default it is
   80 columns. This exercises narrow→wide→narrow resizing of the actual outer
   window. Both outer and pane dimensions are captured. Herdr chrome means pane
   width is not the same as outer width. An unreachable size is not a pass.
-- Guided accent/AltGr/IME commits, with exact expected committed text.
+- Automatic active-layout dead-key acute input, plus guided AltGr, extended
+  accent, and IME commits, with exact expected committed text.
+- Ordered typing, mouse-motion reports, and bracketed paste in one capture, plus
+  legacy→modifyOtherKeys→Kitty→modifyOtherKeys→legacy transitions without restart.
 
 The catalogue also lists explicit **qualification gaps**: mouse click/drag/wheel
 and right-edge coordinate mapping; visual reflow/wrapping; native held-key repeat;
@@ -127,6 +135,10 @@ The retained directory contains:
 - `report.json`: interpreted verdicts and counts;
 - per-window plans, nonce-bound observer acknowledgements, initial/final console
   modes, and bootstrap/probe error records.
+
+The console ends with a capability matrix derived only from that run's captured
+observations. Filtered, unavailable, or operator-assisted cases remain
+`NOT TESTED` or `MANUAL`; the full evidence and reasons remain in `report.json`.
 
 Direct-host and through-Herdr observations are labelled separately. A direct-host
 failure is **not automatically a Herdr bug**. Each row labels its failure scope as

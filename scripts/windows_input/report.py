@@ -40,8 +40,11 @@ def catalogue():
     key("shift-letter", 65, "A", (16,))
     key("enter", 13, "\r")
     key("shift-enter", 13, None, (16,), 13)
+    cases[-1]["expected"]["legacy"] = {"loss": "enter", "hex": ["0d"]}
     key("ctrl-enter", 13, None, (17,), 13)
+    cases[-1]["expected"]["legacy"] = {"loss": "modifier", "hex": ["0a"]}
     key("ctrl-shift-enter", 13, None, (17, 16), 13)
+    cases[-1]["expected"]["legacy"] = {"loss": "modifier", "hex": ["0a"]}
     key("tab", 9, "\t")
     key("shift-tab", 9, "\x1b[Z", (16,))
     cases[-1]["expected"]["kitty"]["hex"].append(hex_of("\x1b[9;2u"))
@@ -74,8 +77,14 @@ def catalogue():
         ("paste-escape-looking", "literal [200~ and \\x1b[31m\nend"),
     ]:
         cases.append(dict(id=name, kind="paste", text=text, expected={mode: {"paste": text} for mode in MODES[1:]}))
+    cases.append(dict(id="mouse-interleave", kind="mouse-interleave", text="mouse\npaste",
+                      expected={mode: {"mouse_interleave": True} for mode in MODES[1:]}))
+    transitions = "a\r" + "b\x1b[27;2;13~" + "c\x1b[13;2u" + "d\x1b[27;2;13~" + "e\r" + "f"
+    cases.append(dict(id="mode-transitions", kind="mode-transitions",
+                      expected={"legacy": {"hex": [hex_of(transitions)]}}))
+    cases.append(dict(id="dead-acute", kind="layout-key", dead="´", base_vk=69,
+                      expected={mode: {"hex": [hex_of("é")]} for mode in MODES[1:]}))
     for name, prompt, text in [
-        ("dead-acute", "With US-International active, type acute then e, once; no Enter.", "é"),
         ("dead-grave", "With US-International active, type grave then e, once; no Enter.", "è"),
         ("dead-circumflex", "With US-International active, type circumflex then e, once; no Enter.", "ê"),
         ("dead-tilde", "With US-International active, type tilde then n, once; no Enter.", "ñ"),
@@ -181,6 +190,13 @@ def verdict(case, mode, evidence):
         raw = bytes.fromhex(evidence["hex"])
     except (KeyError, ValueError, TypeError):
         return "inconclusive", "Missing or malformed raw bytes"
+    if expected.get("mouse_interleave"):
+        motion = rb"(?:\x1b\[<35;\d+;\d+M)+"
+        newline = rb"(?:\r\n|\r|\n)"
+        pattern = b"a" + motion + rb"\x1b\[200~mouse" + newline + rb"paste\x1b\[201~" + motion + b"b"
+        return ("pass", "Typing, mouse motion and paste remained ordered") if re.fullmatch(pattern, raw) else ("fail", "Mouse interleave order or payload differs")
+    if "loss" in expected:
+        return ("unsupported", "Plain VT cannot preserve modified Enter") if raw.hex() in expected["hex"] else ("fail", "Unexpected plain-VT modified Enter result")
     if "hex" in expected:
         return ("pass", "Exact bytes match") if raw.hex() in expected["hex"] else ("fail", "Bytes differ (including any duplicates/trailing input)")
     if not raw.startswith(b"\x1b[200~") or not raw.endswith(b"\x1b[201~"):
@@ -250,23 +266,90 @@ def summarize(document):
     # No run may claim all-green just because it produced zero/missing observations.
     planned = set()
     geometries = [(120, 30, True)] + [(w, h, False) for h in document.get("heights", HEIGHTS) for w in document.get("widths", WIDTHS)] + [(80, 30, False)]
-    for host in ("stable", "preview"):
-        for path in ("direct", "herdr"):
+    selected_cases = document.get("cases") or list(cases)
+    for host in document.get("channels") or ("stable", "preview"):
+        for path in document.get("paths") or ("direct", "herdr"):
             for mode in document.get("modes", MODES):
                 for phase, (width, height, full) in enumerate(geometries, 1):
-                    for case_id in cases if full else ("letter-a", "shift-enter", "paste-lf"):
+                    for case_id in selected_cases if full else (case_id for case_id in ("letter-a", "shift-enter", "paste-lf") if case_id in selected_cases):
                         planned.add((host, path, mode, phase, width, height, case_id))
     missing = planned - seen
     if seen - planned:
         raise ValueError("Observations outside the declared run matrix")
     hosts = document.get("hosts", [])
     errors = list(document.get("errors", [])) + channel_identity_errors(hosts)
-    complete = (bool(rows) and not missing and {h.get("channel") for h in hosts} == {"stable", "preview"}
+    expected_hosts = set(document.get("channels") or ("stable", "preview"))
+    complete = (bool(rows) and not missing and {h.get("channel") for h in hosts} == expected_hosts
                 and all(h.get("runs") for h in hosts)
                 and not errors and not document.get("cleanup_errors")
                 and all(r["status"] == "pass" for r in rows))
     return {**document, "errors": errors, "observations": rows, "counts": counts, "coverage_missing": len(missing), "observed_checks_passed": complete,
             "native_qualification": "Required; this report is not a full Windows support certificate"}
+
+
+def qualification_matrix(result):
+    """Collapse real observations into the user-facing capability summary."""
+    rows = result.get("observations", [])
+    manual_cases = {case["id"] for case in catalogue()["cases"] if case["kind"] == "manual"}
+    groups = [
+        ("Printable keys", {"letter-a", "shift-letter"}, None),
+        ("Shift+Enter", {"shift-enter"}, None),
+        ("Ctrl+Enter", {"ctrl-enter"}, None),
+        ("Ctrl+Shift+Enter", {"ctrl-shift-enter"}, None),
+        ("Navigation/editing", {"up", "down", "left", "right", "home", "end", "insert", "delete", "tab", "shift-tab", "page-up", "page-down"}, None),
+        ("Multiline paste", {"paste-lf"}, None),
+        ("CR/LF/CRLF paste", {"paste-lf", "paste-crlf", "paste-cr"}, None),
+        ("Unicode/whitespace paste", {"paste-unicode", "paste-whitespace"}, None),
+        ("Paste framing/ordering", {case["id"] for case in catalogue()["cases"] if case["kind"] == "paste"}, None),
+        ("Resize 120 -> 80", {"letter-a", "shift-enter", "paste-lf"}, 80),
+        ("Mouse while typing/pasting", {"mouse-interleave"}, None),
+        ("Dead-key composition", {"dead-acute"}, None),
+        ("AltGr", {"altgr-euro"}, None),
+        ("IME composition", {"ime-commit"}, None),
+        ("Runtime mode transitions", {"mode-transitions"}, None),
+    ]
+
+    def cell(case_ids, width, path, modes):
+        matched = [row for row in rows if row.get("case") in case_ids and row.get("path") == path
+                   and row.get("mode") in modes and (width is None or row.get("width") == width)]
+        statuses = {row.get("status") for row in matched}
+        if "fail" in statuses:
+            return "FAIL"
+        if case_ids <= manual_cases and not any(status == "pass" for status in statuses):
+            return "MANUAL"
+        if {row.get("case") for row in matched} != case_ids:
+            return "PARTIAL" if "pass" in statuses else "INCONCLUSIVE" if "inconclusive" in statuses else "NOT TESTED"
+        if path == "direct" and modes == {"legacy"} and statuses == {"unsupported"}:
+            return "X - becomes Enter" if case_ids == {"shift-enter"} else "X - loses modifier"
+        per_case_passed = all(any(row.get("case") == case_id and row.get("status") == "pass" for row in matched) for case_id in case_ids)
+        if per_case_passed and statuses <= {"pass", "inconclusive"}:
+            return "PASS**" if "inconclusive" in statuses else "PASS"
+        if "inconclusive" in statuses:
+            return "INCONCLUSIVE"
+        if "unsupported" in statuses:
+            return "UNSUPPORTED"
+        return "NOT TESTED"
+
+    table = []
+    for name, case_ids, width in groups:
+        herdr_modes = {"legacy"} if name in {"Resize 120 -> 80", "Runtime mode transitions"} else {"mok2"} if "Enter" in name or name in {"Dead-key composition", "AltGr", "IME composition"} else {"legacy"}
+        table.append((name, cell(case_ids, width, "herdr", herdr_modes),
+                      cell(case_ids, width, "direct", {"legacy"}), cell(case_ids, width, "direct", {"kitty"})))
+    return table
+
+
+def print_qualification_matrix(result):
+    table = [("Thing", "Win32 (Herdr)*", "Plain VT", "Kitty"), *qualification_matrix(result)]
+    widths = [max(len(str(row[column])) for row in table) for column in range(4)]
+    line = lambda row: " | ".join(str(value).ljust(widths[index]) for index, value in enumerate(row))
+    print("\nWindows input qualification results")
+    print(line(table[0]))
+    print("-+-".join("-" * width for width in widths))
+    for row in table[1:]:
+        print(line(row))
+    print("* Current-checkout default Herdr path; the gauntlet does not force the Win32 profile.")
+    print("** At least one capable host passed; host capability gaps remain visible in report.json.")
+    print("MANUAL requires an operator-assisted -Manual run; no automated result is claimed.")
 
 
 def main():
@@ -298,6 +381,7 @@ def main():
             print("Run errors: " + " | ".join(result["errors"]))
         if result.get("cleanup_errors"):
             print("Cleanup errors: " + " | ".join(result["cleanup_errors"]))
+        print_qualification_matrix(result)
         return 1 if result["counts"]["fail"] or result.get("errors") or result.get("cleanup_errors") else 2 if not result["observed_checks_passed"] else 0
     return 0
 
