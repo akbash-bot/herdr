@@ -670,9 +670,10 @@ A successful response includes the same `id`:
 {"id":"req_1","result":{"type":"pong"}}
 ```
 
-Error responses also echo the request's `id`, including when the method or
-parameters are invalid. If the request is not valid JSON or has no unambiguous
-top-level string `id`, the error response uses an empty `id`.
+For request lines that reach JSON decoding, error responses also echo the request's
+`id`, including when the method or parameters are invalid. If the JSON is invalid
+or has no unambiguous top-level string `id`, the error response uses an empty `id`.
+Transport errors, such as invalid UTF-8, can close the connection without a response.
 
 Event subscriptions keep the connection open after the initial response.
 
