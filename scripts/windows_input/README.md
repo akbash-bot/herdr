@@ -51,6 +51,16 @@ The full catalogue normally exits `2` because operator-assisted and explicitly
 unimplemented qualification cases remain. That is incomplete coverage, not an
 automated test failure; inspect the printed matrix and retained `report.json`.
 
+### Expected outcome
+
+A healthy run builds and identifies the current checkout, reaches the result
+matrix, and reports no `FAIL` rows or cleanup errors. The default Herdr column
+should identify itself as `Win32 (Herdr)*` from captured runtime evidence. A full
+run may still exit `2` and show `MANUAL`, `NOT TESTED`, or a documented host
+capability limitation when a terminal channel, physical gesture, or oracle is
+unavailable. A focused campaign exits `0` when every selected observation passes;
+exit `1` means an assertion, harness, or cleanup failure and needs investigation.
+
 The recipe itself is the explicit opt-in to foreground input injection. It builds
 the current checkout in release mode, stages that exact binary with the pinned
 ConPTY runtime, and prints its path and hash. Use `-ExePath` only to compare a
@@ -75,6 +85,16 @@ arrays normally:
 .\scripts\test_windows_input.ps1 -ExePath 'C:\test-app\herdr.exe' `
   -AllowInputInjection -Modes legacy,kitty -Cases mouse-interleave,mode-transitions `
   -Widths 120 -Heights 30
+```
+
+`-Paths herdr-remote` runs the current client against its disposable local
+server with the remote clipboard bridge active. It needs no SSH host. A focused
+clipboard-image qualification is:
+
+```powershell
+.\scripts\test_windows_input.ps1 -AllowInputInjection `
+  -Channels stable -Paths direct,herdr-remote -Modes legacy `
+  -Cases clipboard-image,clipboard-mixed -Widths 80 -Heights 24
 ```
 
 Dead-key acute composition is automatic when the target Terminal thread's
@@ -110,6 +130,8 @@ Every run needs a **new** output directory. By default it is
   BMP Unicode/combining characters, and escape-looking text.
   A host binding or multiline-paste confirmation dialog can intercept the gesture;
   the runner does not dismiss unexpected dialogs or rebind Terminal shortcuts.
+- Image-only Ctrl+V through the remote clipboard bridge, plus a mixed image/text
+  clipboard check that proves Windows Terminal and Herdr preserve the text paste.
 - A full case pass at an observed 120×30 host size; keyboard/paste sentinels at
   **80, 119, 120, 121, 132, 160, 240 columns**, at 24 and 50 rows; then return to
   80 columns. This exercises narrow→wide→narrow resizing of the actual outer
@@ -128,7 +150,7 @@ The catalogue also lists explicit **qualification gaps**: mouse drag and
 right-edge coordinate mapping; visual reflow/wrapping; native held-key repeat;
 lock/keypad combinations; dead-key cancellation; IME cancellation; capture/config
 reload and attach cycles; injected setup/recovery faults; supplementary-plane and
-confirmation-triggering burst paste; image/file clipboard integrations; and
+confirmation-triggering burst paste; non-image file clipboard integrations; and
 positive host-scrollback evidence for native PageUp/PageDown. These are recorded
 `not_run` or `inconclusive`, not fabricated successes. They need
 separate fixtures/oracles before becoming automated assertions. The catalogue is
