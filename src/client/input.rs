@@ -107,6 +107,9 @@ fn unix_stdin_reader_loop(
 
     if !initial_host_input.is_empty() {
         let sgr_pixels = host_sgr_pixels_active.load(Ordering::Acquire);
+        if sgr_pixels {
+            last_geometry = crate::input::mouse::HostGeometry::current();
+        }
         let chunks = framer.push(&initial_host_input);
         if !send_unix_input_chunks(
             chunks,
@@ -117,7 +120,7 @@ fn unix_stdin_reader_loop(
         ) {
             return;
         }
-        if framer.has_pending_input()
+        if (framer.has_pending_input() || !pending_palette.is_empty())
             && stdin_read_ready(
                 &reader,
                 idle_flush_timeout_ms(&framer, host_mouse_capture_active.load(Ordering::Acquire)),
@@ -150,6 +153,7 @@ fn unix_stdin_reader_loop(
                 return;
             }
         }
+        pending_mode = framer.has_pending_input().then_some(sgr_pixels);
     }
 
     while !should_quit.load(Ordering::Acquire) {
