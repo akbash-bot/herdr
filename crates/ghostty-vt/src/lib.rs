@@ -2321,8 +2321,23 @@ fn ghostty_screen_point(x: u16, y: u32) -> ffi::GhosttyPoint {
 }
 
 fn grid_ref_graphemes(grid_ref: &ffi::GhosttyGridRef) -> Result<Vec<u32>, Error> {
-    let mut buffer = Vec::new();
-    grid_ref_graphemes_into(grid_ref, &mut buffer)?;
+    let mut required = 0usize;
+    let result =
+        unsafe { ffi::ghostty_grid_ref_graphemes(grid_ref, ptr::null_mut(), 0, &mut required) };
+    if result != ffi::GhosttyResult_GHOSTTY_OUT_OF_SPACE {
+        result.into_result()?;
+    }
+    // Owned cells keep only this grapheme; unlike the row scratch buffer, they
+    // do not benefit from spare capacity for subsequent cells.
+    let mut buffer = vec![0u32; required];
+    if required == 0 {
+        return Ok(buffer);
+    }
+    unsafe {
+        ffi::ghostty_grid_ref_graphemes(grid_ref, buffer.as_mut_ptr(), buffer.len(), &mut required)
+            .into_result()?;
+    }
+    buffer.truncate(required);
     Ok(buffer)
 }
 
@@ -4680,6 +4695,19 @@ mod tests {
         assert_eq!(rows[2].cells[0].graphemes, vec!['界' as u32]);
         assert_eq!(rows[2].cells[1].wide, CellWide::SpacerTail);
         assert_eq!(rows[2].cells[2].graphemes, vec!['e' as u32, 0x301]);
+    }
+
+    #[test]
+    fn owned_cell_graphemes_keep_tight_capacity() {
+        let mut terminal = Terminal::new(8, 1, 100).unwrap();
+        terminal.write("xe\u{301}".as_bytes());
+
+        let rows = terminal.screen_text_rows().unwrap();
+        assert_eq!(rows[0].cells[0].graphemes, vec!['x' as u32]);
+        assert_eq!(rows[0].cells[1].graphemes, vec!['e' as u32, 0x301]);
+        for cell in &rows[0].cells {
+            assert_eq!(cell.graphemes.capacity(), cell.graphemes.len());
+        }
     }
 
     #[test]
