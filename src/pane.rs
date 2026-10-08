@@ -38,8 +38,8 @@ use self::agent_detection::{
     codex_prompt_ready, decide_detection_screen_read, decide_screen_detection_publish,
     detection_update_for_publish_with_osc, mark_detection_content_changed,
     observe_detection_content_change, DetectionPublishDecision, DetectionScreenReadDecision,
-    DetectionScreenReadInput, PendingIdleConfirmation, ScreenDetectionPublishInput,
-    AGENT_PENDING_IDLE_RECHECK, AGENT_STARTUP_GRACE_WINDOW,
+    DetectionScreenReadInput, DetectionTextCache, PendingIdleConfirmation,
+    ScreenDetectionPublishInput, AGENT_PENDING_IDLE_RECHECK, AGENT_STARTUP_GRACE_WINDOW,
 };
 use self::background_agent::{AgentJobStatus, AgentJobTracker};
 #[cfg(test)]
@@ -924,10 +924,13 @@ fn probe_foreground_process(pid: u32, foreground_pgid: Option<u32>) -> ProcessPr
 }
 
 #[cfg(unix)]
+// Handoff detection needs both the write-bracketed text revision and detection epoch.
+#[allow(clippy::too_many_arguments)]
 fn spawn_basic_detection_task(
     pane_id: PaneId,
     child_pid: Arc<AtomicU32>,
     terminal: Arc<PaneTerminal>,
+    content_seq: Arc<AtomicU64>,
     detection_content_seq: Arc<AtomicU64>,
     full_lifecycle_authority_active: Arc<AtomicBool>,
     self_reported_agent_active: Arc<AtomicBool>,
@@ -957,7 +960,7 @@ fn spawn_basic_detection_task(
         let mut pending_foreground_shell_clear = false;
         let mut foreground_shell_exit_reported = false;
         let mut release_was_active = false;
-        let mut last_detection_text = String::new();
+        let mut last_detection_text = DetectionTextCache::default();
         let mut last_screen_scan_detection_content_seq = None;
         let mut agent_startup_grace_until = None;
         let mut pending_idle = PendingIdleConfirmation::default();
@@ -1169,15 +1172,15 @@ fn spawn_basic_detection_task(
                 DetectionScreenReadDecision::Skip => continue,
             }
 
-            let content = terminal.detection_text();
+            let content_changed =
+                last_detection_text.refresh(agent, &content_seq, || terminal.detection_text());
+            let content = &last_detection_text.text;
             last_screen_scan_detection_content_seq = current_detection_content_seq;
-            let content_changed = content != last_detection_text;
-            last_detection_text.clone_from(&content);
             let osc_title = terminal.agent_osc_title();
             let osc_progress = terminal.agent_osc_progress();
             let screen_detection = detection_update_for_publish_with_osc(
                 agent,
-                &content,
+                content,
                 &osc_title,
                 &osc_progress,
                 process_exited,
@@ -1186,7 +1189,7 @@ fn spawn_basic_detection_task(
                 &state_events,
                 pane_id,
                 agent,
-                &content,
+                content,
                 screen_detection.as_ref(),
                 process_exited,
                 &mut last_codex_prompt_ready,
@@ -2648,6 +2651,7 @@ impl PaneRuntime {
             pane_id,
             child_pid.clone(),
             terminal.clone(),
+            content_seq.clone(),
             detection_content_seq.clone(),
             full_lifecycle_authority_active.clone(),
             self_reported_agent_active.clone(),
@@ -2851,6 +2855,7 @@ impl PaneRuntime {
             let child_pid = child_pid.clone();
             let terminal = terminal.clone();
             let state_events = events.clone();
+            let text_content_seq = content_seq.clone();
             let detection_content_seq = detection_content_seq.clone();
             let full_lifecycle_authority_active_for_task = full_lifecycle_authority_active.clone();
             let self_reported_agent_active_for_task = self_reported_agent_active.clone();
@@ -2880,7 +2885,7 @@ impl PaneRuntime {
                 let mut last_visible_blocker = false;
                 let mut last_visible_working = false;
                 let mut last_visible_signal_refresh = None;
-                let mut last_detection_text = String::new();
+                let mut last_detection_text = DetectionTextCache::default();
                 let mut last_screen_scan_detection_content_seq = None;
                 let mut agent_startup_grace_until = None;
                 let mut pending_idle = PendingIdleConfirmation::default();
@@ -3173,15 +3178,16 @@ impl PaneRuntime {
                         DetectionScreenReadDecision::Skip => continue,
                     }
 
-                    let content = terminal.detection_text();
+                    let content_changed =
+                        last_detection_text
+                            .refresh(agent, &text_content_seq, || terminal.detection_text());
+                    let content = &last_detection_text.text;
                     last_screen_scan_detection_content_seq = current_detection_content_seq;
-                    let content_changed = content != last_detection_text;
-                    last_detection_text.clone_from(&content);
                     let osc_title = terminal.agent_osc_title();
                     let osc_progress = terminal.agent_osc_progress();
                     let screen_detection = detection_update_for_publish_with_osc(
                         agent,
-                        &content,
+                        content,
                         &osc_title,
                         &osc_progress,
                         process_exited,
@@ -3190,7 +3196,7 @@ impl PaneRuntime {
                         &state_events,
                         pane_id,
                         agent,
-                        &content,
+                        content,
                         screen_detection.as_ref(),
                         process_exited,
                         &mut last_codex_prompt_ready,
@@ -4027,6 +4033,63 @@ impl PaneRuntime {
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unidentified_text_cache_tracks_runtime_mutations_not_viewport_scroll() {
+        let runtime = PaneRuntime::test_with_scrollback_bytes(
+            12,
+            3,
+            100_000,
+            b"old\r\nold\r\nabcdefghijklmnop\r\nprompt",
+        );
+        let mut cache = DetectionTextCache::default();
+        let reads = Cell::new(0);
+        let refresh = |cache: &mut DetectionTextCache| {
+            cache.refresh(None, &runtime.content_seq, || {
+                reads.set(reads.get() + 1);
+                runtime.terminal.detection_text()
+            })
+        };
+        assert!(
+            refresh(&mut cache),
+            "seeded history must be read at revision zero"
+        );
+        assert_eq!(reads.get(), 1);
+        runtime.scroll_up(2);
+        assert!(!refresh(&mut cache));
+        assert_eq!(
+            reads.get(),
+            1,
+            "viewport scrolling must not rebuild bottom text"
+        );
+        assert_eq!(cache.text, runtime.detection_text());
+
+        // Control-only and fragmented output still invalidate the physical read,
+        // but do not manufacture a text change for acquisition scheduling.
+        runtime.test_process_pty_bytes(b"\x1b]0;title\x07\x1b[");
+        assert!(!refresh(&mut cache));
+        assert_eq!(reads.get(), 2);
+        runtime.test_process_pty_bytes(b"2J\x1b[Hupdated");
+        assert!(refresh(&mut cache));
+        assert_eq!(reads.get(), 3);
+        assert_eq!(cache.text, runtime.detection_text());
+
+        runtime.resize(4, 8, 0, 0);
+        refresh(&mut cache);
+        assert_eq!(reads.get(), 4);
+        assert_eq!(cache.text, runtime.detection_text());
+        runtime.clear_screen().unwrap();
+        refresh(&mut cache);
+        assert_eq!(reads.get(), 5);
+        assert_eq!(cache.text, runtime.detection_text());
+        runtime.test_process_pty_bytes(b"\x1b[?1049halt");
+        assert!(refresh(&mut cache));
+        assert_eq!(reads.get(), 6);
+        assert_eq!(cache.text, runtime.detection_text());
+        assert!(!refresh(&mut cache));
+        assert_eq!(reads.get(), 6);
+    }
 
     #[tokio::test]
     async fn clear_pane_preserves_wrapped_input_and_unfinished_vt_sequence() {
