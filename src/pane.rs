@@ -3896,6 +3896,45 @@ impl PaneRuntime {
         Self::test_with_scrollback_bytes(cols, rows, 0, bytes)
     }
 
+    #[cfg(unix)]
+    pub(crate) fn test_start_basic_detection(&mut self) -> mpsc::Receiver<AppEvent> {
+        if let Some(handle) = self.detect_handle.take() {
+            handle.abort();
+        }
+        let (events, receiver) = mpsc::channel(8);
+        let (handle, reset, release) = spawn_basic_detection_task(
+            self.pane_id,
+            self.child_pid.clone(),
+            self.terminal.clone(),
+            self.content_seq.clone(),
+            self.detection_content_seq.clone(),
+            self.full_lifecycle_authority_active.clone(),
+            self.self_reported_agent_active.clone(),
+            events,
+        );
+        self.detect_handle = Some(handle);
+        self.detect_reset_notify = reset;
+        self.pending_release = release;
+        receiver
+    }
+
+    #[cfg(unix)]
+    pub(crate) async fn test_wait_for_detection_reads(&self, expected: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while self
+                .terminal
+                .ghostty
+                .detection_text_reads
+                .load(Ordering::Relaxed)
+                < expected
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("detection task should extract fresh text");
+    }
+
     pub(crate) fn test_scroll_metrics_reads(&self) -> usize {
         self.terminal
             .ghostty
@@ -4089,6 +4128,84 @@ mod tests {
         assert_eq!(cache.text, runtime.detection_text());
         assert!(!refresh(&mut cache));
         assert_eq!(reads.get(), 6);
+        runtime.test_process_pty_bytes(b"\x1b[?1049l");
+        assert!(refresh(&mut cache));
+        assert_eq!(reads.get(), 7);
+        assert_eq!(cache.text, runtime.detection_text());
+        assert!(!cache.text.contains("alt"));
+        assert!(!refresh(&mut cache));
+        assert_eq!(reads.get(), 7);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unidentified_text_cache_resets_with_adopted_runtime_and_recreation() {
+        let mut runtime = PaneRuntime::test_with_screen_bytes(20, 4, b"first runtime");
+        let _events = runtime.test_start_basic_detection();
+        runtime.test_wait_for_detection_reads(1).await;
+        let revision = runtime.content_seq();
+        runtime.reset_agent_detection();
+        runtime.test_wait_for_detection_reads(2).await;
+        assert_eq!(
+            runtime.content_seq(),
+            revision,
+            "reset does not require output"
+        );
+        drop(runtime);
+
+        // A new runtime can reuse both the pane identity and revision zero. Its
+        // detector must not inherit the previous runtime's text or revision.
+        let mut recreated = PaneRuntime::test_with_screen_bytes(20, 4, b"second runtime");
+        assert_eq!(recreated.content_seq(), revision);
+        let _events = recreated.test_start_basic_detection();
+        recreated.test_wait_for_detection_reads(1).await;
+        assert!(recreated.visible_text().contains("second runtime"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unidentified_text_cache_resets_in_spawned_runtime_without_output() {
+        let (events, _event_rx) = mpsc::channel(8);
+        let runtime = PaneRuntime::spawn_shell_command(
+            PaneId::from_raw(42),
+            4,
+            20,
+            std::env::temp_dir(),
+            "printf 'cache-ready'; exec sleep 30",
+            &PaneLaunchEnv::default(),
+            AgentDetection::Enabled,
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        )
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !runtime.visible_text().contains("cache-ready") {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("shell should populate the terminal");
+        // The first reset guarantees a populated read even if the initial tick
+        // preceded shell output. The second proves that a warm cache is cleared.
+        let revision = {
+            let _write = runtime.content_write_lock.lock().unwrap();
+            runtime.content_seq()
+        };
+        for _ in 0..2 {
+            let reads = runtime
+                .terminal
+                .ghostty
+                .detection_text_reads
+                .load(Ordering::Relaxed);
+            runtime.reset_agent_detection();
+            runtime.test_wait_for_detection_reads(reads + 1).await;
+        }
+        assert_eq!(runtime.content_seq(), revision);
+        runtime.shutdown();
     }
 
     #[tokio::test]
