@@ -76,7 +76,7 @@ pub(super) fn setup_terminal_with_capabilities(
     let (host_probe, buffered_host_input) = if enable_client_protocols {
         terminal_guard.reset_keyboard_enhancements = true;
         push_keyboard_enhancement_flags()?;
-        let (probe, buffered_input) = query_host_capabilities(true)?;
+        let (probe, buffered_input) = query_host_capabilities(true);
         set_mouse_capture(mouse_capture, false)?;
         execute!(io::stdout(), EnableBracketedPaste, EnableFocusChange)?;
         if host_color_scheme_reports {
@@ -88,7 +88,7 @@ pub(super) fn setup_terminal_with_capabilities(
         if should_enable_host_color_scheme_reports(true) {
             write_host_color_scheme_report_mode(&mut io::stdout(), false)?;
         }
-        let (probe, buffered_input) = query_host_capabilities(false)?;
+        let (probe, buffered_input) = query_host_capabilities(false);
         set_mouse_capture(mouse_capture, false)?;
         execute!(io::stdout(), EnableBracketedPaste)?;
         (probe, buffered_input)
@@ -167,7 +167,7 @@ pub(super) struct HostTerminalProbe {
 }
 
 #[cfg(not(windows))]
-fn query_host_capabilities(query_keyboard: bool) -> io::Result<(HostTerminalProbe, Vec<u8>)> {
+fn query_host_capabilities(query_keyboard: bool) -> (HostTerminalProbe, Vec<u8>) {
     const FULL_QUERY: &[u8] = b"\x1b[?1016$p\x1b[?u\x1b[c";
     const PIXEL_MOUSE_QUERY: &[u8] = b"\x1b[?1016$p\x1b[c";
 
@@ -182,7 +182,7 @@ fn query_host_capabilities(query_keyboard: bool) -> io::Result<(HostTerminalProb
         .and_then(|()| io::stdout().flush())
     {
         tracing::debug!(%err, "host capability query unavailable");
-        return Ok((HostTerminalProbe::default(), buffered_input));
+        return (HostTerminalProbe::default(), buffered_input);
     }
 
     // Bypass StdinLock's shared buffer so poll and read observe the same bytes.
@@ -222,28 +222,27 @@ fn query_host_capabilities(query_keyboard: bool) -> io::Result<(HostTerminalProb
         }
     }
 
-    Ok((host_terminal_probe(&responses)?, buffered_input))
+    (host_terminal_probe(&responses), buffered_input)
 }
 
 #[cfg(not(windows))]
-fn host_terminal_probe(responses: &HostKeyboardProbeResponses) -> io::Result<HostTerminalProbe> {
+fn host_terminal_probe(responses: &HostKeyboardProbeResponses) -> HostTerminalProbe {
     let sgr_pixel_mouse = match responses.sgr_pixel_mouse_status {
-        // The query follows an explicit reset. A host that remains SET would
-        // send pixels whenever capture starts, even while Herdr expects cells.
-        Some(1 | 3) => {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "host SGR pixel mouse mode cannot be disabled",
-            ));
+        // The query follows an explicit reset, so a host still reporting SET may
+        // send pixels where Herdr expects cells. Wrong mouse units beat refusing
+        // to start, so keep pixel mouse off and continue.
+        Some(status @ (1 | 3)) => {
+            tracing::warn!(status, "host SGR pixel mouse mode stays set after reset");
+            Some(false)
         }
         Some(2) => Some(true),
         Some(0 | 4) => Some(false),
         _ => None,
     };
-    Ok(HostTerminalProbe {
+    HostTerminalProbe {
         escape_disambiguation: host_escape_disambiguation_confirmed(responses),
         sgr_pixel_mouse,
-    })
+    }
 }
 
 #[cfg(not(windows))]
@@ -380,8 +379,8 @@ fn host_control_string_end(bytes: &[u8]) -> Option<Option<usize>> {
 }
 
 #[cfg(windows)]
-fn query_host_capabilities(_query_keyboard: bool) -> io::Result<(HostTerminalProbe, Vec<u8>)> {
-    Ok((HostTerminalProbe::default(), Vec::new()))
+fn query_host_capabilities(_query_keyboard: bool) -> (HostTerminalProbe, Vec<u8>) {
+    (HostTerminalProbe::default(), Vec::new())
 }
 
 pub(super) fn write_host_color_scheme_report_mode(
@@ -932,12 +931,11 @@ mod tests {
 
             consume_host_keyboard_probe_responses(&mut buffered, &mut responses);
 
-            let probe = host_terminal_probe(&responses);
-            if matches!(status, 1 | 3) {
-                assert_eq!(probe.unwrap_err().kind(), io::ErrorKind::Unsupported);
-            } else {
-                assert_eq!(probe.unwrap().sgr_pixel_mouse, Some(status == 2));
-            }
+            assert_eq!(
+                host_terminal_probe(&responses).sgr_pixel_mouse,
+                Some(status == 2),
+                "status {status}"
+            );
             assert!(buffered.is_empty());
         }
     }
@@ -950,10 +948,7 @@ mod tests {
         consume_host_keyboard_probe_responses(&mut buffered, &mut responses);
 
         assert!(!responses.primary_device_attributes);
-        assert_eq!(
-            host_terminal_probe(&responses).unwrap().sgr_pixel_mouse,
-            Some(false)
-        );
+        assert_eq!(host_terminal_probe(&responses).sgr_pixel_mouse, Some(false));
     }
 
     #[cfg(not(windows))]
@@ -965,10 +960,7 @@ mod tests {
         consume_host_keyboard_probe_responses(&mut buffered, &mut responses);
 
         assert!(host_escape_disambiguation_confirmed(&responses));
-        assert_eq!(
-            host_terminal_probe(&responses).unwrap().sgr_pixel_mouse,
-            Some(true)
-        );
+        assert_eq!(host_terminal_probe(&responses).sgr_pixel_mouse, Some(true));
         assert_eq!(buffered, b"aPtyped");
     }
 
@@ -1010,10 +1002,7 @@ mod tests {
         consume_host_keyboard_probe_responses(&mut buffered, &mut responses);
 
         assert!(host_escape_disambiguation_confirmed(&responses));
-        assert_eq!(
-            host_terminal_probe(&responses).unwrap().sgr_pixel_mouse,
-            Some(true)
-        );
+        assert_eq!(host_terminal_probe(&responses).sgr_pixel_mouse, Some(true));
         assert_eq!(buffered, opaque);
     }
 
